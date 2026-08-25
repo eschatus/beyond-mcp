@@ -1,7 +1,7 @@
 {
   "name": "ddb-mcp",
-  "version": "0.1.0",
-  "description": "Read-only D&D Beyond lookup MCP server — character/monster/campaign reads + game-log roll feed. No VTT writes.",
+  "version": "0.2.0",
+  "description": "D&D Beyond MCP server — character/monster/campaign reads + game-log roll feed, plus opt-in sheet writes. No VTT knowledge.",
   "main": "dist/index.js",
   "scripts": {
     "start": "node dist/index.js",

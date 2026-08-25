@@ -76,14 +76,36 @@ Known data-quality note: a few DDB monster records (homebrew with unfilled field
 `averageHitPoints: 0` / `armorClass: 0`; the mapper passes them through faithfully — guard against
 0 before using them.
 
-## Writes — none, permanently
+## Writes — opt-in, browserless, verified live
 
-D&D Beyond is **read-only** in this server, as a design decision inherited from roll20-dm-mcp
-(its docs/decisions.md §1): Beyond20 owns PC HP and would overwrite a push, and any live mutation
-of a player's sheet should be a deliberate, consented action. roll20-dm-mcp's non-destructive
-probe established that browserless writes *are* technically viable (the JWT bearer authenticates
-against condition/death-save mutation endpoints); that record lives in the parent repo and is
-kept out of this one on purpose. `rtRawFetch` exists for read diagnostics only.
+D&D Beyond writes were originally out of scope (roll20-dm-mcp's read-only stance: Beyond20 owns
+PC HP, sheet mutation should be deliberate). **Reversed 2026-08-25** (Adam) once the write surface
+was proven live: character-service mutation routes accept the same cobalt→JWT bearer the reads
+use — no browser, no separate auth. Writes are gated by `DDB_WRITES=enabled` (see
+`src/tools/ddbWrite.ts`) so default installs stay read-only.
+
+Auth chain is identical to reads (bearer JWT). Contract discovery pattern (used to verify each
+route before shipping a wrapper): PUT/POST an **empty body** — character-service answers `400`
+with a `data` array naming the required fields, e.g.
+`["Missing required field: removedHitPoints", ...]`, which is the route's contract. A `GET` on a
+mutation route returns `405`, confirming it exists and takes PUT/POST/DELETE.
+
+Verified live (against a throwaway character):
+
+| Change | Method | Route (on character-service `/character/v5/`) | Body | Response `data` |
+|---|---|---|---|---|
+| Set HP | PUT | `life/hp/damage-taken` | `{characterId, removedHitPoints, temporaryHitPoints}` | `{removedHitPoints, temporaryHitPoints}` |
+| Apply condition | PUT | `condition` | `{characterId, id, level}` | `{conditions:[{id,level}], …}` |
+| Remove condition | DELETE | `condition` | `{characterId, id, level}` | `{conditions:[…]}` |
+| Create character | POST | `builder/standard-build` | `{showHelpText:false}` | new `characterId` |
+
+`removedHitPoints` is cumulative damage below max (0 = full); the site models damage/heal as
+±removedHitPoints, so the HP primitive sets absolute values and the caller does the arithmetic
+against a read. Applying an **already-present** condition returns a `400 "An unexpected error has
+occurred"` (DDB quirk, not a bug here). The full mutation inventory (rests, inventory, currency,
+build choices, descriptions, death saves, limited-use, spell slots…) is catalogued in
+`docs/ddb-endpoint-atlas-notes.md`; wrappers are added to `ddb-write.ts` only as each body shape
+is verified the same way.
 
 ## Config
 - `DDB_COBALT=<cookie>` — supply the cobalt session directly.

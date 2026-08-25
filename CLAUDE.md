@@ -11,10 +11,18 @@ that repo to Roll20 primitives, put DDB behind its own seam). Consumers: the dm-
 
 ## Invariants — do not violate
 
-- **Read-only against D&D Beyond, permanently.** No write tools, no mutation calls. The write
-  endpoints were probed and proven viable in roll20-dm-mcp and writes were still rejected as a
-  design decision (Beyond20 owns PC HP; sheet mutation needs player consent). Don't revisit
-  without Adam.
+- **Reads are always on; writes are opt-in and are primitives.** This server can effect
+  changes on D&D Beyond (Adam's call, 2026-08-25, reversing the earlier read-only stance).
+  Write tools register ONLY when `DDB_WRITES=enabled`, so prep-time / default installs stay
+  read-only. The write layer (`src/bridge/ddb-write.ts`, `src/tools/ddbWrite.ts`) is a
+  **primitive surface**: it effects exactly the change asked on whatever character id it's
+  given, with NO policy about who owns the sheet or how the server is used upstream — the
+  caller owns intent (this is a general MCP server, ignorant of its consumers). DM-authority
+  model: DDB PC HP is also driven by Beyond20 and the player's own edits, so writes race
+  those (last-writer-wins) — they are deliberate acts, never an automation loop on PC HP.
+  Every write route's body shape is **verified live against character-service before its
+  tool ships** (contract-probe with an empty body; the 400 names required fields) — never
+  add a wrapper for an unverified route.
 - **Never open a browser.** The CobaltSession cookie is consumed from `DDB_COBALT` or
   `<data dir>/ddb-cobalt.json`; the interactive harvest UX lives in the gem. When the cookie
   is absent/expired, fail loudly with re-harvest instructions (`CobaltUnavailableError` in

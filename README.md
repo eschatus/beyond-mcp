@@ -26,6 +26,19 @@ migrate by pointing at this server. The roll pump differs by design: it **buffer
 of posting to Roll20 — the gem drains it and bridges rolls via roll20-dm-mcp's
 `post_roll_as_character`.
 
+### Write tools (opt-in — `DDB_WRITES=enabled`)
+
+Reads are always available; these mutation tools register **only** when the deployment sets
+`DDB_WRITES=enabled`, so prep-time and default installs stay read-only. They are primitives —
+they effect exactly the change asked on whatever character id they're given, with no policy
+about who owns the sheet. Because DDB PC HP is also driven by Beyond20 and the player's own
+edits, writes race those (last-writer-wins) and are meant as the DM's deliberate acts.
+
+| Tool | Does |
+|---|---|
+| `ddb_set_hp` | Set current and/or temp HP by absolute value (clamped to `[0, max]`). |
+| `ddb_apply_condition` / `ddb_remove_condition` | Add/remove a 5e condition by name (exhaustion takes a level). |
+
 ## Auth
 
 Reads authenticate with the D&D Beyond `CobaltSession` cookie (exchanged for a short-lived
@@ -41,6 +54,7 @@ read fails loudly with re-harvest instructions.
 | `DDB_COBALT` | CobaltSession cookie value (overrides the data file). |
 | `DDB_DATA_DIR` | Directory holding `ddb-cobalt.json` + caches. Point at the gem's data dir (roll20-dm-mcp's `ROLL20_DATA_DIR`) to share the harvested cookie. Default `./data`. |
 | `DDB_CAMPAIGN_ID` | Default campaign for `ddb_list_campaign_characters` / `start_ddb_roll_pump`. |
+| `DDB_WRITES` | Set to `enabled` to register the write tools (default: reads only). |
 | `DDB_HTTP_PORT` / `DDB_HTTP_HOST` / `DDB_MCP_TOKEN` | HTTP entry only (defaults 39210 / 127.0.0.1 / auto-generated into `.env`). |
 
 ## Running
