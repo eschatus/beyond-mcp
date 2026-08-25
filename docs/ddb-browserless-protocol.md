@@ -99,6 +99,11 @@ Verified live (against a throwaway character):
 | Remove condition | DELETE | `condition` | `{characterId, id, level}` | `{conditions:[…]}` |
 | Create character | POST | `builder/standard-build` | `{showHelpText:false}` | new `characterId` |
 
+**Write-test fixture:** character **170229415** ("Eschatus's Character") on the account behind
+the cobalt cookie is a throwaway, kept deliberately as the target for live write verification —
+mutate it freely, restore it to full/clean when done. Never test writes against a player-owned
+or campaign sheet.
+
 `removedHitPoints` is cumulative damage below max (0 = full); the site models damage/heal as
 ±removedHitPoints, so the HP primitive sets absolute values and the caller does the arithmetic
 against a read. Applying an **already-present** condition returns a `400 "An unexpected error has
