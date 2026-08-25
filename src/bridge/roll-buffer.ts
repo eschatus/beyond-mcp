@@ -16,7 +16,10 @@ export class RollBuffer {
   private nextSeq = 1;
   private droppedTotal = 0;
 
-  constructor(private readonly cap = 500) {}
+  // Deliberately shallow: buffered rolls are live table events, and a consumer that
+  // comes back after a long stall must NOT replay a flood of stale rolls into chat.
+  // Older entries evict; `missed` in ddb_poll_rolls tells the consumer they existed.
+  constructor(private readonly cap = 10) {}
 
   push(message: DdbGameLogMessage): BufferedRoll {
     const entry: BufferedRoll = { seq: this.nextSeq++, receivedAt: Date.now(), message };

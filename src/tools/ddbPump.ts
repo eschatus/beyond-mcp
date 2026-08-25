@@ -12,7 +12,7 @@ import { text } from "./helpers.js";
 // is the caller's job.
 let pump: DdbGameLogPump | null = null;
 let pumpInfo: { gameId: string; names: string[]; started: number } | null = null;
-const buffer = new RollBuffer(500);
+const buffer = new RollBuffer(10);
 
 // Live subscription hook for the HTTP entry's SSE stream.
 type RollListener = (roll: BufferedRoll) => void;

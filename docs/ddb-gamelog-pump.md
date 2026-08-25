@@ -90,7 +90,7 @@ double-emits.
 
 | Surface | How |
 |---|---|
-| `ddb_poll_rolls` (MCP tool) | Cursor-based drain: pass the previous response's `cursor` as `after`. Response includes a `missed` count if the 500-entry ring evicted rolls the cursor never saw. |
+| `ddb_poll_rolls` (MCP tool) | Cursor-based drain: pass the previous response's `cursor` as `after`. Response includes a `missed` count if the ring evicted rolls the cursor never saw. The ring is deliberately shallow (10 entries) — a consumer returning from a long stall gets the freshest rolls plus a `missed` count, never a replayable flood of stale ones. |
 | `GET /events` (HTTP entry only) | SSE push (`event: roll`), bearer-authed. Same payload plus a `summary` line. |
 
 ## Known / future
