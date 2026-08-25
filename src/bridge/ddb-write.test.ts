@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-const rtRawFetch = vi.fn();
-vi.mock("./ddb-rt.js", () => ({ rtRawFetch: (...a: unknown[]) => rtRawFetch(...a) }));
+const { rtRawFetch } = vi.hoisted(() => ({ rtRawFetch: vi.fn() }));
+vi.mock("./ddb-rt.js", () => ({ rtRawFetch }));
 
 import { setHitPoints, applyCondition, removeCondition, DdbWriteError } from "./ddb-write.js";
 

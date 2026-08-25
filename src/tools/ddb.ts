@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import * as ddb from "../bridge/dndbeyond.js";
+import { rtGetPartySnapshot } from "../bridge/ddb-scds.js";
 import { text } from "./helpers.js";
 
 // Tool names and default output shapes are pinned to what roll20-dm-mcp served, so
@@ -79,6 +80,47 @@ export function registerDdbTools(server: McpServer): void {
         armorClass: monster.armorClass,
         challengeRating: monster.challengeRating,
       }));
+    }
+  );
+
+  server.tool(
+    "ddb_get_party_snapshot",
+    "Precomputed combat snapshot for a whole party in one call, via D&D Beyond's SCDS service. Returns each character's COMPUTED armor class and max/current/temp HP (which the plain character sheet does not carry pre-derived), plus named conditions, death saves, initiative, passives and level. This is the authoritative AC/maxHP source — prefer it over ddb_get_character for live party status. full:true adds resolved attacks (to-hit + damage dice), casting info, abilities, skills, senses, resistances/immunities. Pass characterIds, or a campaignId (defaults to DDB_CAMPAIGN_ID) to snapshot its whole roster.",
+    {
+      characterIds: z.array(z.number().int().positive()).optional().describe("Explicit DDB character ids. Overrides campaignId."),
+      campaignId: z.string().optional().describe("Snapshot every character in this campaign. Defaults to DDB_CAMPAIGN_ID."),
+      full: z.boolean().optional().describe("Include resolved attacks, casting, abilities, skills, senses, resistances (default false — combat vitals only)."),
+    },
+    async ({ characterIds, campaignId, full }) => {
+      let ids = characterIds;
+      if (!ids?.length) {
+        const cid = campaignId ?? defaultCampaignId();
+        if (!cid) return text("Pass characterIds, or a campaignId (or set DDB_CAMPAIGN_ID) to snapshot a roster.");
+        ids = (await ddb.getCampaignCharacters(cid)).map((c) => c.id);
+        if (!ids.length) return text(`Campaign ${cid} has no characters.`);
+      }
+      const snap = await rtGetPartySnapshot(ids);
+      const foundIds = new Set(snap.map((c) => c.characterId));
+      const missing = ids.filter((id) => !foundIds.has(id));
+      const party = snap.map((c) => {
+        const slim = {
+          id: c.characterId,
+          name: c.name,
+          level: c.level,
+          currentHp: c.hitPointInfo?.current,
+          maxHp: c.hitPointInfo?.maximum,
+          temporaryHitPoints: c.hitPointInfo?.temp,
+          armorClass: c.armorClass,
+          conditions: (c.conditions ?? []).map((x) => x.name),
+          deathSaves: c.deathSaveInfo,
+          initiativeBonus: c.initiativeBonus,
+          passivePerception: c.passivePerception,
+        };
+        return full
+          ? { ...slim, attacks: c.attacks, castingInfo: c.castingInfo, abilities: c.abilities, skills: c.skills, senses: c.senses, resistances: c.resistances, immunities: c.immunities, vulnerabilities: c.vulnerabilities }
+          : slim;
+      });
+      return text(JSON.stringify(missing.length ? { party, missing } : { party }));
     }
   );
 }
