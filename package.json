@@ -1,0 +1,50 @@
+{
+  "name": "ddb-mcp",
+  "version": "0.1.0",
+  "description": "Read-only D&D Beyond lookup MCP server — character/monster/campaign reads + game-log roll feed. No VTT writes.",
+  "main": "dist/index.js",
+  "scripts": {
+    "start": "node dist/index.js",
+    "build": "tsc",
+    "prepare": "tsc",
+    "dev": "tsx watch src/index.ts",
+    "serve": "tsx src/index-http.ts",
+    "serve:watch": "tsx watch src/index-http.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "coverage": "vitest run --coverage",
+    "lint": "eslint src/**/*.ts test/**/*.ts"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "//files": [
+    "Consumers install this from git, so `prepare` builds dist/ in the clone; `files` must",
+    "include dist (npm otherwise falls back to .gitignore, which excludes it) and src (the",
+    "gem's esbuild bundle step consumes sources directly)."
+  ],
+  "files": [
+    "dist",
+    "src",
+    "LICENSE"
+  ],
+  "type": "module",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@types/ws": "^8.18.1",
+    "dotenv": "^17.4.2",
+    "ws": "^8.21.1",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^25.9.1",
+    "@vitest/coverage-v8": "^3.2.4",
+    "eslint": "^10.5.0",
+    "tsx": "^4.22.3",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.61.1",
+    "vitest": "^3.2.4"
+  }
+}

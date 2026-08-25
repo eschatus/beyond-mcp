@@ -1,0 +1,9 @@
+node_modules/
+dist/
+coverage/
+.env
+data/
+.tmp-test-data/
+.claude/worktrees/
+.claude/settings.local.json
+*.log
