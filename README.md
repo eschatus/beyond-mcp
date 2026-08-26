@@ -13,6 +13,7 @@ it never opens a browser.
 
 | Tool | Does |
 |---|---|
+| `ddb_ping` | Handshake: `{pong, server, version, capabilities}`. Call on connect to assert a minimum version (semver) and see which capabilities (writes/rollPump/partySnapshot) this instance exposes. |
 | `ddb_get_character` | Character sheet by numeric id — compact HP/AC/conditions snapshot; `full:true` adds the parsed stat sheet (abilities, saves, skills, initiative). |
 | `ddb_get_monster` | Compendium monster by name or id — compact HP/AC/CR snapshot; `full:true` returns the whole statblock. |
 | `ddb_list_campaigns` | Every campaign the account is in, with ids. |

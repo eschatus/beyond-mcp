@@ -35,6 +35,12 @@ that repo to Roll20 primitives, put DDB behind its own seam). Consumers: the dm-
   Extend additively (like the `full` flags), never reshape defaults.
 - Rolls captured by the pump carry DDB's actual dice values — consumers must mirror them,
   never re-roll. Keep tool descriptions saying so.
+- **Version is a consumer contract.** `ddb_ping` and MCP `serverInfo` both announce
+  `src/version.ts`'s `VERSION`; consumers pin a ref and floor the version against it
+  (the gem's `EXPECTED_DDB_MCP_VERSION`). So: bump `VERSION` **and** `package.json`
+  together on any consumer-visible change, and **cut a `vX.Y.Z` git tag on the release
+  commit** (roll20-dm-mcp convention) so consumers pin `#vX.Y.Z`, not a bare SHA. Adding a
+  tool is a minor bump. `git push` does NOT push tags — `git push origin vX.Y.Z` explicitly.
 
 ## Commands
 
