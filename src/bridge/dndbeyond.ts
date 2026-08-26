@@ -169,7 +169,7 @@ export async function getCharacter(ddbCharId: number): Promise<DdbCharacter> {
     // with a browser page-intercept. This server is browserless, so surface what to do instead.
     if (String(err).includes("403")) {
       throw new Error(
-        `ddb-mcp: character ${ddbCharId} returned 403 — the sheet rejects direct API auth for this ` +
+        `beyond-mcp: character ${ddbCharId} returned 403 — the sheet rejects direct API auth for this ` +
         `account (typically a DM-shared sheet). Browserless reads can't work around this: set the ` +
         `sheet's privacy to Public/Campaign, or use the sheet owner's CobaltSession.`,
         { cause: err },

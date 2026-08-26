@@ -52,7 +52,7 @@ function noCobaltError(reason: "absent" | "rejected"): CobaltUnavailableError {
     ? "no D&D Beyond session cookie is available"
     : "the D&D Beyond session cookie was rejected (expired or revoked), and no fresher one is available";
   return new CobaltUnavailableError(
-    `ddb-mcp: ${what}. This server never opens a browser — re-harvest CobaltSession in the gem ` +
+    `beyond-mcp: ${what}. This server never opens a browser — re-harvest CobaltSession in the gem ` +
     `(writes ${cobaltFile()}) or set DDB_COBALT in the env, then retry.`,
   );
 }

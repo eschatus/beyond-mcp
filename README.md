@@ -1,13 +1,16 @@
-# ddb-mcp
+# beyond-mcp
 
-Read-only D&D Beyond lookup MCP server: character sheets, monster statblocks, campaign
-rosters, and a live game-log roll feed. Extracted from
+D&D Beyond MCP server: character sheets, monster statblocks, campaign rosters, a live
+game-log roll feed, and opt-in sheet writes. Extracted from
 [roll20-dm-mcp](https://github.com/eschatus/roll20-dm-mcp) per its issue #171 so DDB rides
 behind its own MCP seam — the dm-whisper gem and Claude Code select it by config, next to
 interchangeable VTT-primitive servers (roll20-dm-mcp today, forge-mcp/ddb-maps-mcp later).
 
-**This server knows nothing about Roll20 or any VTT.** It never writes to D&D Beyond, and
-it never opens a browser.
+**This server knows nothing about Roll20 or any VTT**, and it never opens a browser. Reads
+are always on; writes are opt-in (`DDB_WRITES=enabled`).
+
+> Formerly `ddb-mcp`; renamed to avoid a collision with the unrelated public
+> [ddb-mcp/ddb-mcp](https://github.com/ddb-mcp/ddb-mcp). Old repo URLs redirect.
 
 ## Tools
 
@@ -72,7 +75,7 @@ Claude Code `.mcp.json`:
 ```json
 {
   "mcpServers": {
-    "ddb": { "command": "node", "args": ["E:/personalProjects/ddb-mcp/dist/index.js"] }
+    "ddb": { "command": "node", "args": ["E:/personalProjects/beyond-mcp/dist/index.js"] }
   }
 }
 ```

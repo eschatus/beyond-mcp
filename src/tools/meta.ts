@@ -11,7 +11,7 @@ import { text } from "./helpers.js";
 
 export interface DdbPong {
   pong: true;
-  server: "ddb-mcp";
+  server: "beyond-mcp";
   /** semver of this server build (tracks package.json). Compare against your minimum. */
   version: string;
   capabilities: {
@@ -27,7 +27,7 @@ export interface DdbPong {
 export function pong(): DdbPong {
   return {
     pong: true,
-    server: "ddb-mcp",
+    server: "beyond-mcp",
     version: VERSION,
     capabilities: {
       writes: writesEnabled(),

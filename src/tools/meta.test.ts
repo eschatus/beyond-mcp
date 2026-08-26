@@ -9,7 +9,7 @@ describe("ddb_ping handshake", () => {
   it("reports name, the build version, and always-on capabilities", () => {
     delete process.env.DDB_WRITES;
     const p = pong();
-    expect(p).toMatchObject({ pong: true, server: "ddb-mcp", version: VERSION });
+    expect(p).toMatchObject({ pong: true, server: "beyond-mcp", version: VERSION });
     expect(p.capabilities.rollPump).toBe(true);
     expect(p.capabilities.partySnapshot).toBe(true);
     expect(p.capabilities.writes).toBe(false);

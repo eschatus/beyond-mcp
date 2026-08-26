@@ -6,7 +6,7 @@ import { registerMetaTools } from "./tools/meta.js";
 import { VERSION } from "./version.js";
 
 export function buildServer(): McpServer {
-  const server = new McpServer({ name: "ddb-mcp", version: VERSION });
+  const server = new McpServer({ name: "beyond-mcp", version: VERSION });
   registerMetaTools(server);   // ddb_ping — version/capability handshake
   registerDdbTools(server);
   registerDdbPumpTools(server);

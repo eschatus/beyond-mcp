@@ -37,8 +37,8 @@ function bootstrapToken(): string {
     writeFileSync(envPath, envContent + `DDB_MCP_TOKEN=${token}\n`, "utf-8");
   }
   console.error(
-    "\n[ddb-mcp] First-time setup: DDB_MCP_TOKEN generated and saved to .env.\n" +
-    "[ddb-mcp] Point clients at this server with header `Authorization: Bearer <token>`.\n",
+    "\n[beyond-mcp] First-time setup: DDB_MCP_TOKEN generated and saved to .env.\n" +
+    "[beyond-mcp] Point clients at this server with header `Authorization: Bearer <token>`.\n",
   );
   process.env.DDB_MCP_TOKEN = token;
   return token;
@@ -201,7 +201,7 @@ const httpServer = http.createServer(async (req, res) => {
       res.writeHead(405).end("Method not allowed");
     }
   } catch (err) {
-    console.error("[ddb-mcp http] request error:", err);
+    console.error("[beyond-mcp http] request error:", err);
     if (!res.headersSent) {
       res.writeHead(500, { "Content-Type": "application/json" }).end(
         JSON.stringify({
@@ -216,5 +216,5 @@ const httpServer = http.createServer(async (req, res) => {
 
 httpServer.listen(PORT, HOST, () => {
   // stderr so it never pollutes any stdio JSON-RPC consumer.
-  console.error(`[ddb-mcp http] MCP server listening on http://${HOST}:${PORT}/mcp (rolls SSE at /events)`);
+  console.error(`[beyond-mcp http] MCP server listening on http://${HOST}:${PORT}/mcp (rolls SSE at /events)`);
 });

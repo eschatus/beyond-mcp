@@ -35,8 +35,8 @@ callable endpoint.
 
 ### ddb-mcp/ddb-mcp (github.com/ddb-mcp/ddb-mcp, MIT) — unrelated project, name collision
 
-Not to be confused with this repo (also literally named `ddb-mcp`; a naming collision Adam
-should be aware of if this project is ever published). It is a **Playwright browser-automation**
+Not to be confused with this repo, which was originally named `ddb-mcp` too — that collision is
+why this project was renamed to **beyond-mcp** when it went public (2026-08-26). It is a **Playwright browser-automation**
 MCP server: interactive Wizards-ID login (`ddb_login`) persists a session to
 `~/.config/ddb-mcp/session.json`, and every tool works by `page.goto()` + DOM scraping —
 including search, which scrapes `https://www.dndbeyond.com/search?q=` and the
