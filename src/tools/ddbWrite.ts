@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import * as write from "../bridge/ddb-write.js";
 import { getCharacter, getCurrentHp, getMaxHp } from "../bridge/dndbeyond.js";
+import { CONDITION_IDS } from "../bridge/ddb-monster-tables.js";
 import { text } from "./helpers.js";
 
 // D&D Beyond WRITE tools. Registered only when DDB_WRITES=enabled (see writesEnabled()).
@@ -14,12 +15,6 @@ import { text } from "./helpers.js";
 export function writesEnabled(): boolean {
   return (process.env.DDB_WRITES ?? "").toLowerCase() === "enabled";
 }
-
-const CONDITION_IDS: Record<string, number> = {
-  blinded: 1, charmed: 2, deafened: 3, exhaustion: 4, frightened: 5, grappled: 6,
-  incapacitated: 7, invisible: 8, paralyzed: 9, petrified: 10, poisoned: 11, prone: 12,
-  restrained: 13, stunned: 14, unconscious: 15,
-};
 
 export function registerDdbWriteTools(server: McpServer): void {
   server.tool(

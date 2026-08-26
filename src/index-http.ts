@@ -1,6 +1,5 @@
 import http, { IncomingMessage } from "node:http";
 import { randomUUID, timingSafeEqual } from "node:crypto";
-import { readFileSync, writeFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import "dotenv/config";
@@ -11,6 +10,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 
 import { buildServer } from "./server.js";
+import { resolveAuthToken } from "./httpToken.js";
 import { onBufferedRoll } from "./tools/ddbPump.js";
 import { summarizeRoll } from "./bridge/ddb-gamelog.js";
 
@@ -26,25 +26,16 @@ const PORT = Number(process.env.DDB_HTTP_PORT) || 39210;
 const HOST = process.env.DDB_HTTP_HOST || "127.0.0.1";
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 
-// Shared-secret bearer token. Auto-generated into .env on first run if not set.
-function bootstrapToken(): string {
-  const token = randomUUID();
-  const envPath = resolve(ROOT, ".env");
-  let envContent = "";
-  try { envContent = readFileSync(envPath, "utf-8"); } catch {}
-  if (!/^DDB_MCP_TOKEN=.+/m.test(envContent)) {
-    if (envContent && !envContent.endsWith("\n")) envContent += "\n";
-    writeFileSync(envPath, envContent + `DDB_MCP_TOKEN=${token}\n`, "utf-8");
-  }
+// Shared-secret bearer token: the env, else the .env beside this module, else generated
+// into that .env. See httpToken.ts for why the file read matters when cwd isn't the root.
+const { token: AUTH_TOKEN, generated: TOKEN_GENERATED } = resolveAuthToken(resolve(ROOT, ".env"));
+process.env.DDB_MCP_TOKEN = AUTH_TOKEN;
+if (TOKEN_GENERATED) {
   console.error(
     "\n[beyond-mcp] First-time setup: DDB_MCP_TOKEN generated and saved to .env.\n" +
     "[beyond-mcp] Point clients at this server with header `Authorization: Bearer <token>`.\n",
   );
-  process.env.DDB_MCP_TOKEN = token;
-  return token;
 }
-
-const AUTH_TOKEN = process.env.DDB_MCP_TOKEN || bootstrapToken();
 const AUTH_TOKEN_BUF = Buffer.from(AUTH_TOKEN, "utf8");
 
 // DNS-rebinding protection allowlists. A malicious web page could otherwise point

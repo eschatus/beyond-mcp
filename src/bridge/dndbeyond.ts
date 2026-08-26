@@ -1,15 +1,17 @@
 // D&D Beyond domain layer: raw service payloads (ddb-rt.ts) → typed shapes and stats.
 //
-// D&D Beyond is READ-ONLY in this server, permanently — no write path exists or will be
-// added (see docs/ddb-browserless-protocol.md, "Writes"). And there is no browser: the
-// old Playwright fallbacks (DOM scrapes, the page-intercept 403 workaround for
-// DM-accessible sheets) stayed behind in roll20-dm-mcp and were not carried here.
+// This module is the READ half. Mutations live in ddb-write.ts and register as tools only
+// when DDB_WRITES=enabled (reversed from the original read-only stance on 2026-08-25 —
+// see CLAUDE.md, "Invariants"). There is still no browser: the old Playwright fallbacks
+// (DOM scrapes, the page-intercept 403 workaround for DM-accessible sheets) stayed behind
+// in roll20-dm-mcp and were not carried here.
 
 import { rtGetRawCharacter, rtGetMonster, rtListCampaigns, rtGetCampaignCharacters, rtGetDamageAdjustments } from "./ddb-rt.js";
 import {
-  challengeRatingLabel, ALIGNMENTS, SIZES, MOVEMENTS, CONDITIONS, DAMAGE_ADJUSTMENTS,
-  type DamageAdjustment,
+  challengeRatingLabel, ALIGNMENTS, SIZES, MOVEMENTS, CONDITIONS, CONDITION_NAMES_LOWER,
+  DAMAGE_ADJUSTMENTS, type DamageAdjustment,
 } from "./ddb-monster-tables.js";
+import { decodeEntities } from "./html.js";
 
 export interface DdbCharacter {
   id: number;
@@ -27,24 +29,26 @@ export interface DdbCharacter {
   // Present in raw API response — used to compute Con-modifier HP contribution
   classes: Array<{ level: number }>;
   stats: Array<{ id: number; value: number | null }>;  // id 3 = Constitution
+  // Also in the raw payload. Optional here because a caller may hand-build the shape, but
+  // when present they change the final ability scores (and so max HP) — see getMaxHp.
+  overrideStats?: Array<{ id: number; value: number | null }>;
+  modifiers?: Record<string, Array<{ type: string; subType: string; value: number | null }>>;
 }
 
+// The ONE HP formula. parseStats resolves the same numbers through finalAbilityScores, so
+// both paths must read Constitution the same way: a raw `stats` lookup misses overrideStats
+// and item/feat `constitution-score` bonuses, which understates max HP by (bonus/2 × level)
+// — wrong in ddb_get_character, and wrong on the sheet when ddb_set_hp derives
+// removedHitPoints from it.
 export function getMaxHp(char: DdbCharacter): number {
   const totalLevel = (char.classes ?? []).reduce((s, c) => s + c.level, 0);
-  const conScore = (char.stats ?? []).find(s => s.id === 3)?.value ?? 10;
-  const conMod = Math.floor((conScore - 10) / 2);
-  return char.overrideHitPoints ?? (char.baseHitPoints + (char.bonusHitPoints ?? 0) + conMod * totalLevel);
+  const conMod = Math.floor((finalAbilityScores(char).constitution - 10) / 2);
+  return char.overrideHitPoints ?? ((char.baseHitPoints ?? 0) + (char.bonusHitPoints ?? 0) + conMod * totalLevel);
 }
 
 export function getCurrentHp(char: DdbCharacter): number {
   return getMaxHp(char) - char.removedHitPoints;
 }
-
-const DDB_CONDITION_NAMES: Record<number, string> = {
-  1:"blinded", 2:"charmed", 3:"deafened", 4:"exhaustion", 5:"frightened",
-  6:"grappled", 7:"incapacitated", 8:"invisible", 9:"paralyzed", 10:"petrified",
-  11:"poisoned", 12:"prone", 13:"restrained", 14:"stunned", 15:"unconscious",
-};
 
 const ABILITY_IDS: Record<number, string> = { 1:"strength",2:"dexterity",3:"constitution",4:"intelligence",5:"wisdom",6:"charisma" };
 const SKILL_TO_ABILITY: Record<string, number> = {
@@ -66,31 +70,42 @@ export interface DdbCharacterStats {
   conditions: string[];  // active condition names, lowercased
 }
 
- 
-export function parseStats(raw: any): DdbCharacterStats {
-  // Final ability scores: override > base + modifier bonuses
+type Modifier = { type: string; subType: string; value: number | null };
+
+// Every modifier the sheet applies, flattened across its source buckets.
+
+function allModifiers(raw: any): Modifier[] {
+  return [...(raw.modifiers?.race ?? []), ...(raw.modifiers?.class ?? []),
+          ...(raw.modifiers?.background ?? []), ...(raw.modifiers?.item ?? []),
+          ...(raw.modifiers?.feat ?? []), ...(raw.modifiers?.condition ?? [])];
+}
+
+// Final ability scores: override > base + `<ability>-score` bonus modifiers. Shared by
+// parseStats and getMaxHp so the two can never disagree about Constitution.
+
+function finalAbilityScores(raw: any, mods: Modifier[] = allModifiers(raw)): Record<string, number> {
   const scores: Record<string, number> = {};
-  for (const stat of (raw.stats ?? [])) {
-    scores[ABILITY_IDS[stat.id as number]] = stat.value as number;
-  }
+  for (const stat of (raw.stats ?? [])) scores[ABILITY_IDS[stat.id as number]] = stat.value as number;
   const overrides: Record<number, number | null> = {};
   for (const s of (raw.overrideStats ?? [])) overrides[s.id] = s.value;
-
-  const allMods: { type: string; subType: string; value: number | null }[] =
-    [...(raw.modifiers?.race ?? []), ...(raw.modifiers?.class ?? []),
-     ...(raw.modifiers?.background ?? []), ...(raw.modifiers?.item ?? []),
-     ...(raw.modifiers?.feat ?? []), ...(raw.modifiers?.condition ?? [])];
 
   const finalScores: Record<string, number> = {};
   for (const [idStr, ability] of Object.entries(ABILITY_IDS)) {
     const id = parseInt(idStr);
     if (overrides[id] != null) { finalScores[ability] = overrides[id]!; continue; }
     let score = scores[ability] ?? 10;
-    for (const m of allMods) {
+    for (const m of mods) {
       if (m.type === "bonus" && m.subType === `${ability}-score` && m.value != null) score += m.value;
     }
     finalScores[ability] = score;
   }
+  return finalScores;
+}
+
+
+export function parseStats(raw: any): DdbCharacterStats {
+  const allMods = allModifiers(raw);
+  const finalScores = finalAbilityScores(raw, allMods);
 
   const abilityMods: Record<string, number> = {};
   for (const [a, s] of Object.entries(finalScores)) abilityMods[a] = Math.floor((s - 10) / 2);
@@ -128,8 +143,7 @@ export function parseStats(raw: any): DdbCharacterStats {
 
   const percBonus = skills["perception"]?.bonus ?? abilityMods["wisdom"];
   const walkSpeed = raw.race?.weightSpeeds?.normal?.walk ?? 30;
-  const conMod = abilityMods["constitution"] ?? 0;
-  const maxHp = raw.overrideHitPoints ?? ((raw.baseHitPoints ?? 0) + (raw.bonusHitPoints ?? 0) + conMod * totalLevel);
+  const maxHp = getMaxHp(raw as DdbCharacter);   // one formula, shared — never re-derive it here
 
   return {
     name: raw.name as string,
@@ -146,19 +160,9 @@ export function parseStats(raw: any): DdbCharacterStats {
     armorClass: raw.armorClass ?? 10,
     hp: { max: maxHp, current: maxHp - (raw.removedHitPoints ?? 0), temp: raw.temporaryHitPoints ?? 0 },
     conditions: (raw.conditions ?? [])
-      .map((c: { id: number }) => DDB_CONDITION_NAMES[c.id])
+      .map((c: { id: number }) => CONDITION_NAMES_LOWER[c.id])
       .filter(Boolean),
   };
-}
-
-export async function getCharacterStats(ddbCharId: number): Promise<DdbCharacterStats> {
-  const raw = await getRawCharacter(ddbCharId);
-  return parseStats(raw);
-}
-
- 
-export async function getRawCharacter(ddbCharId: number): Promise<any> {
-  return rtGetRawCharacter(ddbCharId);
 }
 
 export async function getCharacter(ddbCharId: number): Promise<DdbCharacter> {
@@ -251,18 +255,8 @@ interface RawDdbMonster {
   bonusActionsDescription?: string | null;
 }
 
-function decodeMonsterEntities(s: string): string {
-  return s
-    // numeric entities first — homebrew statblocks litter descriptions with &#160; (nbsp) etc.
-    .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)))
-    .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)))
-    .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
-    .replace(/&#39;/g, "'").replace(/&rsquo;/g, "'").replace(/&lsquo;/g, "'")
-    .replace(/&quot;/g, '"').replace(/&nbsp;/g, " ").replace(/&mdash;/g, "—").replace(/&ndash;/g, "–");
-}
-
 function stripHtml(html: string): string {
-  return decodeMonsterEntities(html.replace(/<[^>]+>/g, "")).replace(/\s+/g, " ").trim();
+  return decodeEntities(html.replace(/<[^>]+>/g, "")).replace(/\s+/g, " ").trim();
 }
 
 // Parse a monster-service *Description HTML blob into named abilities. Each <p> whose lead run is
@@ -343,50 +337,3 @@ export async function getMonster(nameOrId: string | number): Promise<DdbMonster>
   return mapRawMonster(raw as RawDdbMonster, overlay);
 }
 
-export function getMonsterAbilityScores(monster: DdbMonster): Record<string, number> {
-  const scores: Record<string, number> = { strength:10, dexterity:10, constitution:10, intelligence:10, wisdom:10, charisma:10 };
-  for (const stat of (monster.stats ?? [])) {
-    const ability = ABILITY_IDS[stat.id];
-    if (ability && stat.value != null) scores[ability] = stat.value;
-  }
-  return scores;
-}
-
-export function getMonsterAbilities(monster: DdbMonster): string {
-  const lines: string[] = [];
-
-  if (monster.speed) {
-    const parts: string[] = [];
-    if (monster.speed.walk) parts.push(`${monster.speed.walk}ft walk`);
-    if (monster.speed.fly) parts.push(`${monster.speed.fly}ft fly${monster.speed.canHover ? " (hover)" : ""}`);
-    if (monster.speed.swim) parts.push(`${monster.speed.swim}ft swim`);
-    if (monster.speed.burrow) parts.push(`${monster.speed.burrow}ft burrow`);
-    if (monster.speed.climb) parts.push(`${monster.speed.climb}ft climb`);
-    if (parts.length > 0) lines.push(`Speed: ${parts.join(", ")}`);
-  }
-
-  if (monster.alignment) lines.push(`Alignment: ${monster.alignment}`);
-
-  const formatAbilities = (label: string, items: DdbMonsterAbility[] | undefined) => {
-    if (!items || items.length === 0) return;
-    lines.push(`${label}:`);
-    for (const item of items) {
-      lines.push(`  ${item.name}: ${item.description}`);
-    }
-  };
-
-  formatAbilities("Special Traits", monster.specialTraits);
-  formatAbilities("Actions", monster.actions);
-  formatAbilities("Bonus Actions", monster.bonusActions);
-  formatAbilities("Reactions", monster.reactions);
-  formatAbilities("Legendary Actions", monster.legendaryActions);
-
-  const resistances: string[] = [];
-  if (monster.damageImmunities?.length) resistances.push(`Immune: ${monster.damageImmunities.join(", ")}`);
-  if (monster.damageResistances?.length) resistances.push(`Resistant: ${monster.damageResistances.join(", ")}`);
-  if (monster.damageVulnerabilities?.length) resistances.push(`Vulnerable: ${monster.damageVulnerabilities.join(", ")}`);
-  if (monster.conditionImmunities?.length) resistances.push(`Condition immune: ${monster.conditionImmunities.join(", ")}`);
-  if (resistances.length > 0) lines.push(resistances.join("  "));
-
-  return lines.join("\n");
-}

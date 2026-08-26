@@ -1,2 +1,2 @@
 // Keep in sync with package.json (rootDir prevents importing it directly).
-export const VERSION = "0.4.0";
+export const VERSION = "0.4.1";

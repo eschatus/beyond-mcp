@@ -46,11 +46,24 @@ export const MOVEMENTS: Record<number, "walk" | "burrow" | "climb" | "fly" | "sw
   1: "walk", 2: "burrow", 3: "climb", 4: "fly", 5: "swim",
 };
 
+// The ONE condition table. Three copies of this used to exist (here, in dndbeyond.ts as
+// lowercase names, in ddbWrite.ts reversed), so the same condition could read "Blinded" on a
+// monster and "blinded" on a character, and adding a condition meant three edits. The two
+// derived views below keep every existing output byte-identical.
 export const CONDITIONS: Record<number, string> = {
   1: "Blinded", 2: "Charmed", 3: "Deafened", 4: "Exhaustion", 5: "Frightened", 6: "Grappled",
   7: "Incapacitated", 8: "Invisible", 9: "Paralyzed", 10: "Petrified", 11: "Poisoned", 12: "Prone",
   13: "Restrained", 14: "Stunned", 15: "Unconscious",
 };
+
+/** id → lowercase name — the character-sheet output shape roll20-dm-mcp pinned. */
+export const CONDITION_NAMES_LOWER: Record<number, string> = {};
+/** lowercase name → id — what the write tools take from a caller. */
+export const CONDITION_IDS: Record<string, number> = {};
+for (const [id, name] of Object.entries(CONDITIONS)) {
+  CONDITION_NAMES_LOWER[Number(id)] = name.toLowerCase();
+  CONDITION_IDS[name.toLowerCase()] = Number(id);
+}
 
 // damageAdjustmentId → {name, type}. type 1=resistance, 2=immunity, 3=vulnerability. The list runs
 // to homebrew/published entries with long conditional names; only the id, name and type matter here.

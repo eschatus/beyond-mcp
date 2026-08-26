@@ -1,6 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { rtGetCampaignCharacters } from "../bridge/ddb-rt.js";
+import { rtGetCampaignCharacters, type RtCampaignCharacter } from "../bridge/ddb-rt.js";
 import { DdbGameLogPump, summarizeRoll, type DdbGameLogMessage } from "../bridge/ddb-gamelog.js";
 import { RollBuffer, type BufferedRoll } from "../bridge/roll-buffer.js";
 import { text } from "./helpers.js";
@@ -22,15 +22,42 @@ export function onBufferedRoll(fn: RollListener): () => void {
   return () => listeners.delete(fn);
 }
 
-async function resolveEntityIds(gameId: string, names: string[]): Promise<{ ids: string[]; resolved: string[]; missing: string[] }> {
+/**
+ * Match one requested name to exactly one campaign character. Exact (case-insensitive) wins;
+ * otherwise a substring match in either direction, but only when it lands on a single
+ * character — "Kai" against both "Kaila" and "Kairon" is ambiguous, not a coin flip.
+ *
+ * Roster entries with blank names are skipped: `"broo".includes("")` is true, so a nameless
+ * character absorbed EVERY request and the pump armed on its entityId — reporting success,
+ * then capturing nothing.
+ */
+export function matchByName(chars: RtCampaignCharacter[], name: string): { hit?: RtCampaignCharacter; candidates: RtCampaignCharacter[] } {
+  const want = name.trim().toLowerCase();
+  if (!want) return { candidates: [] };
+  const named = chars.filter((c) => (c.characterName ?? "").trim().length > 0);
+
+  const exact = named.filter((c) => c.characterName.trim().toLowerCase() === want);
+  if (exact.length === 1) return { hit: exact[0], candidates: exact };
+
+  const partial = named.filter((c) => {
+    const have = c.characterName.trim().toLowerCase();
+    return have.includes(want) || want.includes(have);
+  });
+  return partial.length === 1 ? { hit: partial[0], candidates: partial } : { candidates: partial };
+}
+
+interface EntityResolution { ids: string[]; resolved: string[]; missing: string[]; ambiguous: string[] }
+
+async function resolveEntityIds(gameId: string, names: string[]): Promise<EntityResolution> {
   const chars = await rtGetCampaignCharacters(gameId);       // [{ id, characterName }]
-  const ids: string[] = [], resolved: string[] = [], missing: string[] = [];
+  const ids: string[] = [], resolved: string[] = [], missing: string[] = [], ambiguous: string[] = [];
   for (const n of names) {
-    const hit = chars.find((c) => c.characterName?.toLowerCase().includes(n.toLowerCase()) || n.toLowerCase().includes((c.characterName ?? "").toLowerCase()));
+    const { hit, candidates } = matchByName(chars, n);
     if (hit) { ids.push(String(hit.id)); resolved.push(`${n} → ${hit.characterName} (${hit.id})`); }
+    else if (candidates.length > 1) ambiguous.push(`${n} → ${candidates.map((c) => c.characterName).join(" / ")}`);
     else missing.push(n);
   }
-  return { ids, resolved, missing };
+  return { ids, resolved, missing, ambiguous };
 }
 
 export function registerDdbPumpTools(server: McpServer): void {
@@ -52,10 +79,18 @@ export function registerDdbPumpTools(server: McpServer): void {
       let entityIds: string[] | undefined;
       let resolvedNote = "all characters";
       if (characterNames?.length) {
-        const { ids, resolved, missing } = await resolveEntityIds(game, characterNames);
-        if (!ids.length) return text(`None of [${characterNames.join(", ")}] matched a character in DDB game ${game}. Check the names.`);
+        const { ids, resolved, missing, ambiguous } = await resolveEntityIds(game, characterNames);
+        if (!ids.length) {
+          return text(
+            `None of [${characterNames.join(", ")}] matched exactly one character in DDB game ${game}.` +
+            (ambiguous.length ? ` AMBIGUOUS: ${ambiguous.join("; ")} — use the full name.` : "") +
+            " Check the names (list them with ddb_list_campaign_characters).",
+          );
+        }
         entityIds = ids;
-        resolvedNote = resolved.join("; ") + (missing.length ? ` · UNMATCHED: ${missing.join(", ")}` : "");
+        resolvedNote = resolved.join("; ")
+          + (missing.length ? ` · UNMATCHED: ${missing.join(", ")}` : "")
+          + (ambiguous.length ? ` · AMBIGUOUS, skipped: ${ambiguous.join("; ")}` : "");
       }
 
       pumpInfo = { gameId: game, names: characterNames ?? [], started: Date.now() };

@@ -13,6 +13,8 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
 import path from "path";
 import { dataPath } from "../dataDir.js";
+// The campaign/character APIs return HTML-escaped display names (e.g. "Wizards 3&amp;4").
+import { decodeEntities } from "./html.js";
 
 const AUTH_SVC = "https://auth-service.dndbeyond.com/v1/cobalt-token";
 const CHAR_SVC = "https://character-service.dndbeyond.com/character/v5";
@@ -195,12 +197,6 @@ export async function rtGetMonster(nameOrId: string | number): Promise<any> {
   // Prefer an exact (case-insensitive) name match over search-rank order.
   const want = String(nameOrId).toLowerCase();
   return list.find((m) => String((m as { name?: string }).name ?? "").toLowerCase() === want) ?? list[0];
-}
-
-// The campaign/character APIs return HTML-escaped display names (e.g. "Wizards 3&amp;4").
-function decodeEntities(s: string): string {
-  return s.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
-    .replace(/&#39;/g, "'").replace(/&rsquo;/g, "'").replace(/&quot;/g, '"');
 }
 
 export interface RtCampaign { id: string; name: string; playerCount?: number }

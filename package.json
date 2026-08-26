@@ -1,6 +1,6 @@
 {
   "name": "beyond-mcp",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "D&D Beyond MCP server — character/monster/campaign reads + game-log roll feed, plus opt-in sheet writes. No VTT knowledge.",
   "main": "dist/index.js",
   "scripts": {

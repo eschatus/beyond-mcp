@@ -77,6 +77,42 @@ describe("getMaxHp", () => {
     });
     expect(getMaxHp(char)).toBe(99);
   });
+
+  // Regression: getMaxHp read the RAW Con score while parseStats resolved the final one, so a
+  // Con-boosting item understated max HP — and ddb_set_hp derives removedHitPoints from it,
+  // silently writing the wrong current HP to the real sheet.
+  it("applies item/feat constitution-score bonuses to the Con contribution", () => {
+    // Level 5, base CON 14 + 2 from an item → CON 16 (+3): 33 + 3*5 = 48, not 43.
+    const char = makeChar({
+      baseHitPoints: 33,
+      classes: [{ level: 5 }],
+      stats: [{ id: 3, value: 14 }],
+      modifiers: { item: [{ type: "bonus", subType: "constitution-score", value: 2 }] },
+    });
+    expect(getMaxHp(char)).toBe(48);
+  });
+
+  it("honors overrideStats for Constitution", () => {
+    // Base CON 8 overridden to 18 (+4) over 4 levels → 20 + 16 = 36.
+    const char = makeChar({
+      baseHitPoints: 20,
+      classes: [{ level: 4 }],
+      stats: [{ id: 3, value: 8 }],
+      overrideStats: [{ id: 3, value: 18 }],
+    });
+    expect(getMaxHp(char)).toBe(36);
+  });
+
+  it("agrees with parseStats — one formula, so the two can never diverge", () => {
+    const char = makeChar({
+      baseHitPoints: 33,
+      classes: [{ level: 5 }],
+      stats: [{ id: 3, value: 14 }],
+      modifiers: { item: [{ type: "bonus", subType: "constitution-score", value: 2 }] },
+    });
+
+    expect(parseStats(char as any).hp.max).toBe(getMaxHp(char));
+  });
 });
 
 describe("getCurrentHp", () => {
