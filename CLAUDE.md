@@ -23,6 +23,18 @@ that repo to Roll20 primitives, put DDB behind its own seam). Consumers: the dm-
   Every write route's body shape is **verified live against character-service before its
   tool ships** (contract-probe with an empty body; the 400 names required fields) — never
   add a wrapper for an unverified route.
+- **Homebrew creation rides the same gate** (`src/bridge/ddb-homebrew.ts`, `src/tools/ddbHomebrew.ts`).
+  There is no homebrew API: it drives www's server-rendered builder forms over plain HTTP
+  (`rtSiteSession` cookie jar, `html-form.ts` parse/fill/encode) — still no browser. Rules
+  that are easy to break: address controls by stable element **id** (names are hashed per
+  render), match selects by **label only** (values collide with labels — CR "5" is value 9),
+  treat a redirect to `/error` as failure, and verify every write by read-back (edit form +
+  monster-service + baked label tables). A new homebrew type ships only after a live
+  round-trip on a throwaway private creation. Builder reads lag writes: verify through `settle()`,
+  confirm deletes by a repeat delete answering 404, resolve edit paths with `resolveEditPath`.
+  Deletes are SOFT (creations stay listed as Deleted in My Creations), so name test creations
+  `zz beyond-mcp …`. Option-id escape for ambiguous labels is `{ value }` everywhere (never a bare
+  number). Protocol: `docs/ddb-homebrew-protocol.md`; per-type notes: `docs/ddb-homebrew-types.md`.
 - **Never open a browser.** The CobaltSession cookie is consumed from `DDB_COBALT` or
   `<data dir>/ddb-cobalt.json`; the interactive harvest UX lives in the gem. When the cookie
   is absent/expired, fail loudly with re-harvest instructions (`CobaltUnavailableError` in
@@ -64,6 +76,14 @@ src/tools/ddbPump.ts    pump tools        │                         mapRawMons
 src/bridge/roll-buffer.ts  cursor ring    │
 src/bridge/ddb-gamelog.ts  WS pump ───────┘     (game-log WS takes the JWT as ?stt=)
 src/bridge/ddb-monster-tables.ts                baked id→name tables (CR, alignment, …)
+src/tools/ddbHomebrew*.ts ─▶ src/bridge/ddb-homebrew-{type}.ts   one module per homebrew type
+                                 │   (monster = ddb-homebrew.ts; spell, item, feat, background,
+                                 │    species, subclass) + ddb-homebrew-list.ts (My Creations)
+                                 ▼
+                     src/bridge/ddb-homebrew-core.ts  submit/ajaxPost/settle/deleteCreation/
+                                 │                     resolveEditPath/modifier subtypes
+                                 ▼
+                     html-form.ts + rtSiteSession (www cookie jar)
 ```
 
 - Entry points: `index.ts` (stdio), `index-http.ts` (streamable HTTP + `/events` rolls SSE,

@@ -13,11 +13,16 @@ describe("ddb_ping handshake", () => {
     expect(p.capabilities.rollPump).toBe(true);
     expect(p.capabilities.partySnapshot).toBe(true);
     expect(p.capabilities.writes).toBe(false);
+    expect(p.capabilities.homebrewMonsters).toBe(false);
+    expect(p.capabilities.homebrewList).toBe(true);
+    expect(p.capabilities.homebrewTypes).toEqual([]);
   });
 
   it("reflects DDB_WRITES=enabled in capabilities.writes", () => {
     process.env.DDB_WRITES = "enabled";
     expect(pong().capabilities.writes).toBe(true);
+    expect(pong().capabilities.homebrewMonsters).toBe(true);
+    expect(pong().capabilities.homebrewTypes).toContain("subclass");
   });
 
   it("version tracks the package build so consumers can floor it", () => {

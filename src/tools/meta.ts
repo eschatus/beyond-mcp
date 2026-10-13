@@ -1,6 +1,9 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { VERSION } from "../version.js";
 import { writesEnabled } from "./ddbWrite.js";
+
+// Keep in step with the homebrew registrations in server.ts.
+export const HOMEBREW_WRITE_TYPES = ["monster", "spell", "magic-item", "feat", "background", "species", "subclass"] as const;
 import { text } from "./helpers.js";
 
 // Version/capability handshake. A consumer (the gem, module-ingest) calls ddb_ping on
@@ -21,6 +24,12 @@ export interface DdbPong {
     rollPump: boolean;
     /** Batched precomputed party snapshot (ddb_get_party_snapshot) is available. */
     partySnapshot: boolean;
+    /** Homebrew monster create/update/delete (ddb_create_homebrew_monster, …) are registered. Same gate as writes. */
+    homebrewMonsters: boolean;
+    /** ddb_list_homebrew (the account's own creations) is available. A read, so always on. */
+    homebrewList: boolean;
+    /** Homebrew types with create/update/delete tools on this instance (empty unless writes are on). */
+    homebrewTypes: string[];
   };
 }
 
@@ -33,6 +42,9 @@ export function pong(): DdbPong {
       writes: writesEnabled(),
       rollPump: true,
       partySnapshot: true,
+      homebrewMonsters: writesEnabled(),
+      homebrewList: true,
+      homebrewTypes: writesEnabled() ? [...HOMEBREW_WRITE_TYPES] : [],
     },
   };
 }

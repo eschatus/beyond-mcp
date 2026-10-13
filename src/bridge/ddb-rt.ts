@@ -199,6 +199,18 @@ export async function rtGetMonster(nameOrId: string | number): Promise<any> {
   return list.find((m) => String((m as { name?: string }).name ?? "").toLowerCase() === want) ?? list[0];
 }
 
+// Raw monster-service record by id, homebrew-inclusive (`showHomebrew=t` is what makes the
+// account's private creations visible). Used to read a homebrew write back for verification.
+// Caveat (live-observed by prior art): monster-service keeps serving DELETED homebrew from its
+// CDN, so this is not a deletion oracle.
+
+export async function rtGetHomebrewMonster(id: number): Promise<any> {
+  const data = await rtJson<{ data: unknown[] }>(`${MON_SVC}?ids=${id}&showHomebrew=t`);
+  const list = Array.isArray(data.data) ? data.data : [];
+  if (list.length === 0) throw new Error(`ddb-rt: monster not found: ${id}`);
+  return list[0];
+}
+
 export interface RtCampaign { id: string; name: string; playerCount?: number }
 
 // The "campaign set" — every campaign the user is in (as DM or player). Same endpoint Avrae's
@@ -225,6 +237,55 @@ export async function rtGetCampaignCharacters(campaignId: string): Promise<RtCam
 // status/body without this module deciding what "success" looks like. Reads only.
 export function rtRawFetch(url: string, opts: RtFetchOpts = {}): Promise<Response> {
   return rtFetch(url, opts);
+}
+
+// --- www.dndbeyond.com site session (the homebrew builders) ---
+//
+// The homebrew builders are server-rendered forms on www, authenticated by cookies alone. The
+// site sets more cookies as you go (notably `RequestVerificationToken`, whose value the delete
+// flow echoes back as a form field), so a session keeps a small jar seeded with CobaltSession
+// and merges every Set-Cookie. Redirects are NOT followed: a create's 302 Location carries the
+// new entity id, and the caller needs to see it.
+
+const SITE_TIMEOUT_MS = 60_000;
+
+export interface SiteFetchInit { method?: "GET" | "POST"; body?: FormData | URLSearchParams; headers?: Record<string, string> }
+
+export interface SiteSession {
+  fetch(pathOrUrl: string, init?: SiteFetchInit): Promise<Response>;
+  cookie(name: string): string | undefined;
+}
+
+export function rtSiteSession(): SiteSession {
+  const jar = new Map<string, string>([["CobaltSession", getCobalt()]]);
+  const absorb = (res: Response) => {
+    for (const line of res.headers.getSetCookie()) {
+      const [pair] = line.split(";");
+      const eq = pair.indexOf("=");
+      if (eq <= 0) continue;
+      const name = pair.slice(0, eq).trim();
+      const value = pair.slice(eq + 1).trim();
+      if (value) jar.set(name, value); else jar.delete(name);
+    }
+  };
+  return {
+    cookie: (name) => jar.get(name),
+    async fetch(pathOrUrl, init = {}) {
+      const url = pathOrUrl.startsWith("http") ? pathOrUrl : `${WWW}${pathOrUrl}`;
+      const headers: Record<string, string> = {
+        ...BASE_HEADERS,
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        Cookie: [...jar].map(([k, v]) => `${k}=${v}`).join("; "),
+        ...init.headers,
+      };
+      if (init.method === "POST") { headers["Origin"] = WWW; headers["Referer"] ??= url; }
+      // Bounded: a builder request was seen to hang for minutes (live, background delete). A write
+      // primitive must fail loud rather than wedge its caller.
+      const res = await fetch(url, { method: init.method ?? "GET", headers, body: init.body, redirect: "manual", signal: AbortSignal.timeout(SITE_TIMEOUT_MS) });
+      absorb(res);
+      return res;
+    },
+  };
 }
 
 // --- live damageAdjustments overlay (the one monster table that drifts as DDB adds content) ---
