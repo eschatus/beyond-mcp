@@ -11,8 +11,11 @@
 //   sub-del   POST /entity/prerequisite/{pid}/delete, /modifier/{mid}/delete    (ajax-post, hrefs taken verbatim from the edit page)
 //   delete    POST /homebrew/creations/delete?entityTypeId=1088085227&id={id}  (ajax-post; re-delete 404 is the oracle)
 //
-// Out of v1 (exist on the edit page, not wrapped): options (/feats/{id}-{slug}/feat-option/create),
-// spells (/entity/spell/create/…), actions (/entity/limited-use/create/…), creature rules.
+//   option    GET+POST /feats/{id}-{slug}/feat-option/create                 urlencoded → 302 …/feat-option/{oid}/edit
+//             (name, description trio, snippet; delete = GET modal → `ajax-post` /feats/{id}-{slug}/feat-option/{oid}/delete)
+//   actions / spells: the shared sub-forms in ddb-homebrew-entity.ts (feat owner type 1088085227). A
+//             feat OPTION is itself an owner (entity type 400581042, live-verified): its own "Add Action".
+// Out of scope (exist on the edit page, not wrapped): creature rules.
 //
 // Verification uses three oracles, none of which covers everything:
 //   - the re-rendered EDIT FORM: version and tags (and the other form controls);
@@ -27,6 +30,11 @@ import { rtSiteSession, rtRawFetch, type SiteSession } from "./ddb-rt.js";
 import { parseForm, setControl, controlById, type ParsedForm } from "./html-form.js";
 import { DdbWriteError } from "./ddb-write.js";
 import {
+  addLimitedUse, verifyLimitedUse, validateLimitedUse, validateEntitySpell, addEntitySpell, verifyEntitySpell,
+  entityDeleteLinks, listLimitedUses, listEntitySpells,
+  type HomebrewLimitedUse, type HomebrewEntitySpell,
+} from "./ddb-homebrew-entity.js";
+import {
   getPage, loadForm, submit, ajaxPost, verifyEditForm, deleteCreation, settle, SETTLE_DELAYS_MS,
   embeddedSubTypes, resolveSubType, fillModifierForm, resolveEditPath, type Asked, type HomebrewModifier,
 } from "./ddb-homebrew-core.js";
@@ -38,6 +46,8 @@ let settleDelays: readonly number[] = SETTLE_DELAYS_MS;
 export function setSettleDelaysForTests(d: readonly number[]): void { settleDelays = d; }
 
 export const FEAT_ENTITY_TYPE_ID = 1088085227;
+/** Owner entity type of a feat option (live-verified: its edit page links /entity/limited-use/create/{oid}-400581042). */
+export const FEAT_OPTION_ENTITY_TYPE_ID = 400581042;
 const FEATS_JSON = "https://character-service.dndbeyond.com/character/v5/game-data/feats";
 
 // --- caller-facing field model (labels, not DDB ids) ---
@@ -50,6 +60,16 @@ export interface HomebrewFeatRequirement {
 }
 export interface HomebrewFeatPrerequisite { description: string; requirements?: HomebrewFeatRequirement[] }
 
+/** A choice offered by the feat ("Choose one: Steady Aim, Quick Shot, ..."). */
+export interface HomebrewFeatOption {
+  name: string;
+  description?: string;            // HTML
+  snippet?: string;
+  actions?: HomebrewLimitedUse[];  // the option's own "Add Action" (e.g. a use-limited benefit)
+}
+
+export type { HomebrewLimitedUse, HomebrewEntitySpell } from "./ddb-homebrew-entity.js";
+
 export interface HomebrewFeatFields {
   name?: string;
   version?: string;
@@ -59,6 +79,9 @@ export interface HomebrewFeatFields {
   // Sub-entries. On update, a provided list REPLACES that kind wholesale; omitted = untouched.
   prerequisites?: HomebrewFeatPrerequisite[];
   modifiers?: HomebrewModifier[];
+  options?: HomebrewFeatOption[];
+  actions?: HomebrewLimitedUse[];  // limited-use actions of the feat itself
+  spells?: HomebrewEntitySpell[];  // spell grants (the feat form has no always-prepared / level controls)
 }
 
 /** Fill the main builder form. Pure (no I/O). Returns the controls it set whose values a re-read of the form must show. */
@@ -86,6 +109,12 @@ export function fillFeatForm(form: ParsedForm, f: HomebrewFeatFields): Asked {
 /** Structural checks that need no network, so a bad request fails before anything is created. */
 export function validateFeatFields(f: HomebrewFeatFields): void {
   const bad = (m: string) => { throw new DdbWriteError(`ddb-homebrew feat: ${m}`, 400, null); };
+  for (const [i, o] of (f.options ?? []).entries()) {
+    if (!o.name.trim()) bad(`options[${i}] needs a name`);
+    for (const a of o.actions ?? []) validateLimitedUse(a);
+  }
+  for (const a of f.actions ?? []) validateLimitedUse(a);
+  for (const sp of f.spells ?? []) validateEntitySpell(sp);
   for (const [i, p] of (f.prerequisites ?? []).entries()) {
     if (!p.description.trim()) bad(`prerequisites[${i}] needs a description`);
     for (const [j, r] of (p.requirements ?? []).entries()) {
@@ -106,6 +135,14 @@ const EDIT_FORM = /\/create-feat\/[^/]+\/edit$/;
 export function deleteLinks(editHtml: string, kind: "prerequisites" | "modifiers"): string[] {
   const re = kind === "prerequisites" ? /href="(\/entity\/prerequisite\/\d+\/delete)"/g : /href="(\/modifier\/\d+\/delete)"/g;
   return [...new Set([...editHtml.matchAll(re)].map((m) => m[1]))];
+}
+
+/** Options listed on a feat's edit page: ids and verbatim delete hrefs (the listing shows only descriptions). */
+export function optionLinks(editHtml: string): Array<{ id: number; deleteHref: string }> {
+  const re = /href="(\/feats\/[^"/]+\/feat-option\/(\d+)\/delete)"/g;
+  const seen = new Map<number, string>();
+  for (const m of editHtml.matchAll(re)) seen.set(Number(m[2]), m[1]);
+  return [...seen].map(([id, deleteHref]) => ({ id, deleteHref }));
 }
 
 const clean = (s: string) => s.replace(/\s+/g, " ").trim();
@@ -178,6 +215,8 @@ interface Expectation {
   json: { name?: string; description?: string; snippet?: string };
   prerequisites?: ExpectedPrereq[];
   modifiers?: string[];
+  /** Counts the feat's edit page must list (options, actions, spell grants). */
+  counts?: { options?: number; actions?: number; spells?: number };
 }
 
 const norm = (s: unknown) => clean(String(s ?? "")).toLowerCase();
@@ -221,6 +260,12 @@ export function featMismatches(want: Expectation, edit: ParsedForm, editHtml: st
       out.push(`edit page modifiers: asked ${JSON.stringify(want.modifiers)}, page lists ${JSON.stringify(rows)}`);
     }
   }
+  if (want.counts) {
+    const got = { options: optionLinks(editHtml).length, actions: listLimitedUses(editHtml).length, spells: listEntitySpells(editHtml).length };
+    for (const k of ["options", "actions", "spells"] as const) {
+      if (want.counts[k] !== undefined && want.counts[k] !== got[k]) out.push(`edit page ${k}: asked ${want.counts[k]}, page lists ${got[k]}`);
+    }
+  }
   return out;
 }
 
@@ -237,9 +282,44 @@ async function verifyOrThrow(s: SiteSession, featId: number, editPath: string, w
   return feat;
 }
 
+/** Add one option (and its own actions); verifies the option's edit form. */
+async function addOption(s: SiteSession, featId: number, slug: string, o: HomebrewFeatOption): Promise<void> {
+  const form = await loadForm(s, `/feats/${slug}/feat-option/create`, /feat-option\/create$/);
+  const asked: Asked = new Map();
+  const set = (id: string, v: string | undefined) => { if (v === undefined) return; setControl(form, id, v); asked.set(id, [...controlById(form, id).values]); };
+  set("field-name", o.name);
+  set("field-snippet", o.snippet);
+  if (o.description !== undefined) {
+    setControl(form, "field-description-type", "1");
+    setControl(form, "field-description-wysiwyg", o.description);
+    setControl(form, "field-description", o.description);
+  }
+  const location = await submit(s, form, `add option "${o.name}" to feat ${featId}`);
+  const m = location.match(/\/feat-option\/(\d+)\/edit/);
+  if (!m) throw new DdbWriteError(`ddb-homebrew add option "${o.name}" to feat ${featId}: unexpected redirect ${location}`, 303, location);
+  const optionId = Number(m[1]);
+  const optionPath = `/feats/${slug}/feat-option/${optionId}/edit`;
+  try {
+    for (const a of o.actions ?? []) await verifyLimitedUse(s, await addLimitedUse(s, optionId, FEAT_OPTION_ENTITY_TYPE_ID, a));
+    const { mismatches } = await settle(async () => {
+      const edit = parseForm(await getPage(s, optionPath), /feat-option\/\d+\/edit$/);
+      const out = verifyEditForm(asked, edit);
+      const gotDesc = controlById(edit, "field-description-wysiwyg").values[0] ?? "";
+      if (o.description !== undefined && clean(gotDesc) !== clean(o.description)) out.push(`description: asked ${JSON.stringify(o.description)}, DDB has ${JSON.stringify(gotDesc)}`);
+      return { value: null, mismatches: out };
+    }, settleDelays);
+    if (mismatches.length) throw new DdbWriteError(`ddb-homebrew: feat option ${optionId} was written but the read-back differs - ${mismatches.join("; ")}`, 200, mismatches);
+  } catch (err) {
+    const e = err instanceof DdbWriteError ? err : null;
+    throw new DdbWriteError(`ddb-homebrew: option "${o.name}" (${optionId}) of feat ${featId} was created, then: ${(err as Error).message}`, e?.status ?? 500, e?.detail ?? null);
+  }
+}
+
+type Added = Pick<Expectation, "prerequisites" | "modifiers" | "counts">;
+
 /** Add the provided sub-entry kinds; returns what the verification must find. */
-async function addSubEntries(s: SiteSession, featId: number, f: HomebrewFeatFields): Promise<Pick<Expectation, "prerequisites" | "modifiers">> {
-  const out: Pick<Expectation, "prerequisites" | "modifiers"> = {};
+async function addSubEntries(s: SiteSession, featId: number, slug: string, f: HomebrewFeatFields): Promise<Added> {
+  const out: Added = {};
   if (f.prerequisites !== undefined) {
     out.prerequisites = [];
     for (const p of f.prerequisites) out.prerequisites.push(await addPrerequisite(s, featId, p));
@@ -247,6 +327,18 @@ async function addSubEntries(s: SiteSession, featId: number, f: HomebrewFeatFiel
   if (f.modifiers !== undefined) {
     out.modifiers = [];
     for (const m of f.modifiers) out.modifiers.push(await addModifier(s, featId, m));
+  }
+  if (f.options !== undefined) {
+    for (const o of f.options) await addOption(s, featId, slug, o);
+    out.counts = { ...out.counts, options: f.options.length };
+  }
+  if (f.actions !== undefined) {
+    for (const a of f.actions) await verifyLimitedUse(s, await addLimitedUse(s, featId, FEAT_ENTITY_TYPE_ID, a));
+    out.counts = { ...out.counts, actions: f.actions.length };
+  }
+  if (f.spells !== undefined) {
+    for (const sp of f.spells) await verifyEntitySpell(s, await addEntitySpell(s, featId, FEAT_ENTITY_TYPE_ID, sp));
+    out.counts = { ...out.counts, spells: f.spells.length };
   }
   return out;
 }
@@ -271,7 +363,7 @@ export async function createHomebrewFeat(f: HomebrewFeatFields): Promise<Homebre
   const editPath = `/homebrew/creations/create-feat/${m[1]}/edit`;
   // The feat exists from here on; a later failure must name it so the caller can fix or delete it.
   try {
-    const subs = await addSubEntries(s, id, f);
+    const subs = await addSubEntries(s, id, m[1], f);
     const raw = await verifyOrThrow(s, id, editPath, { asked, json: jsonExpectation(f), ...subs });
     return { id, editUrl: `https://www.dndbeyond.com${editPath}`, raw };
   } catch (err) {
@@ -301,7 +393,13 @@ export async function updateHomebrewFeat(featId: number, f: HomebrewFeatFields):
       if (f[kind] === undefined) continue;
       for (const href of deleteLinks(editHtml, kind)) await ajaxPost(s, href, `remove ${kind.replace(/s$/, "")} from feat ${featId} (${href})`);
     }
-    const subs = await addSubEntries(s, featId, f);
+    const hrefs: Array<[string, string[]]> = [];
+    if (f.options !== undefined) hrefs.push(["option", optionLinks(editHtml).map((o) => o.deleteHref)]);
+    if (f.actions !== undefined) hrefs.push(["action", entityDeleteLinks(editHtml, "limitedUse")]);
+    if (f.spells !== undefined) hrefs.push(["spell grant", entityDeleteLinks(editHtml, "spell")]);
+    for (const [what, list] of hrefs) for (const href of list) await ajaxPost(s, href, `remove ${what} from feat ${featId} (${href})`);
+    const slugNow = editPath.match(/create-feat\/([^/]+)\/edit/)![1];
+    const subs = await addSubEntries(s, featId, slugNow, f);
     const raw = await verifyOrThrow(s, featId, editPath, { asked, json: jsonExpectation(f), ...subs });
     return { id: featId, editUrl: `https://www.dndbeyond.com${editPath}`, raw };
   } catch (err) {

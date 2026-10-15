@@ -89,11 +89,11 @@ const SUB_TYPES: Pairs = [["51", "Fire"], ["134", "Fire"], ["60", "Cold"]]; // f
 const SUB_TYPE_CATALOGUE = `[[{"id":51,"name":"Fire","type":2},{"id":60,"name":"Cold","type":2},{"id":134,"name":"Fire","type":3}]]`;
 const DICE: Pairs = [["6", "d6"], ["8", "d8"]];
 const CONDITIONS: Pairs = [["1", "Blinded"], ["3", "Charmed"]];
-const COND_UNITS: Pairs = [["2", "Minute"], ["6", "Special"]];
+const COND_UNITS: Pairs = [["1", "Round"], ["2", "Minute"], ["6", "Special"]];
 const EFFECTS: Pairs = [["1", "Additional Targets"], ["3", "Extended Duration"]];
 const radio = (e: string, v: string, saved: Saved) => `<input type="radio" id="field-condition-effect-${e}" name="condition-effect" value="${v}"${saved?.get("condition-effect") === v ? " checked" : ""} />`;
 
-function subForm(kind: "modifier" | "condition" | "additional", action: string, saved: Saved): string {
+function subForm(kind: "modifier" | "condition" | "additional", action: string, saved: Saved, modOptions: Pairs = []): string {
   const body = {
     modifier: [
       sel("spell-modifier-type", MOD_TYPES, saved), sel("spell-modifier-sub-type", SUB_TYPES, saved), txt("dice-count", saved), sel("dice-value", DICE, saved),
@@ -104,7 +104,7 @@ function subForm(kind: "modifier" | "condition" | "additional", action: string, 
       sel("condition", CONDITIONS, saved), txt("condition-duration", saved), sel("duration-unit", COND_UNITS, saved), area("condition-exception", saved),
     ],
     additional: [
-      txt("level", saved), sel("modifier", [], saved), sel("effect-type", EFFECTS, saved), txt("dice-count", saved), sel("dice-value", DICE, saved),
+      txt("level", saved), sel("modifier", modOptions, saved), sel("effect-type", EFFECTS, saved), txt("dice-count", saved), sel("dice-value", DICE, saved),
       txt("dice-fixed", saved), area("dice-details", saved),
     ],
   }[kind];
@@ -152,7 +152,8 @@ function fakeDdb(opts: { corrupt?: (fd: FormData) => void; defOverride?: (def: a
       const k = m[1] as Kind;
       if (method === "GET") {
         const script = k === "modifier" ? `<script>var subTypes = ${SUB_TYPE_CATALOGUE};\nvar subTypesValue = ;</script>` : "";
-        return { status: 200, body: subForm(k, path, undefined) + script };
+        const modOptions: Pairs = [...st.subs.modifier.keys()].reverse().map((id) => [String(id), `Damage - Fire (${id})`]); // deliberately unsorted
+        return { status: 200, body: subForm(k, path, undefined, modOptions) + script };
       }
       st.subs[k].set(++st.nextSub, body as FormData | any);
       return { status: 302, location: `${editPath()}#${k}` };
@@ -164,7 +165,8 @@ function fakeDdb(opts: { corrupt?: (fd: FormData) => void; defOverride?: (def: a
       const saved = st.subs[k].get(sub);
       if (!saved) return { status: 404 };
       const value = k === "modifier" ? `<script>var subTypesValue = ${saved.get("spell-modifier-sub-type")};</script>` : "";
-      return { status: 200, body: subForm(k, path, saved as any) + value };
+      const modOptions: Pairs = [...st.subs.modifier.keys()].map((id) => [String(id), `Damage - Fire (${id})`]);
+      return { status: 200, body: subForm(k, path, saved as any, modOptions) + value };
     }
     if (key === `POST /homebrew/creations/delete?entityTypeId=1118725998&id=${ID}`) {
       if (st.deleted) return { status: 404 };
@@ -191,7 +193,10 @@ function fakeDdb(opts: { corrupt?: (fd: FormData) => void; defOverride?: (def: a
       asPartOfWeaponAttack: fd.get("as-part-of-weapon-attack") === "y",
       saveDcAbilityId: fd.get("spell-save-type") ? Number(fd.get("spell-save-type")) : null,
       tags: fd.getAll("spell-tags-public").map((v) => label(OPT.tags, String(v))),
-      modifiers: [...st.subs.modifier.keys()], conditions: [...st.subs.condition.keys()],
+      attackType: fd.get("attack-type") ? Number(fd.get("attack-type")) : null,
+      requiresAttackRoll: fd.get("as-part-of-weapon-attack") !== "y" && !!fd.get("attack-type"),
+      atHigherLevels: { higherLevelDefinitions: [...st.subs.additional.values()].filter((a) => !a.get("modifier")).map(() => ({})) },
+      modifiers: [...st.subs.modifier.keys()].map((id) => ({ id, atHigherLevels: { higherLevelDefinitions: [...st.subs.additional.values()].filter((a) => a.get("modifier") === String(id)).map(() => ({})) } })), conditions: [...st.subs.condition.keys()],
     };
     if (opts.defOverride) def = opts.defOverride(def, st.defCalls);
     st.defCalls++;
@@ -253,6 +258,14 @@ describe("fillSpellForm", () => {
     expect(asked.get("field-higher-level-scale")).toEqual([""]);
   });
 
+  it("sets a spell attack as the attack type WITHOUT the weapon-attack box, and clears it on null", () => {
+    const f = edit();
+    const asked = fillSpellForm(f, { spellAttack: { type: "Ranged" } });
+    expect(asked.get("field-as-part-of-weapon-attack")).toEqual([]);
+    expect(asked.get("field-attack-type")).toEqual(["2"]);
+    expect(fillSpellForm(f, { spellAttack: null }).get("field-attack-type")).toEqual([""]);
+  });
+
   it("refuses a label that is not an option", () => {
     expect(() => fillSpellForm(create(), { school: "Pyromancy" })).toThrow(/"Pyromancy" is not an option of #field-spell-school/);
   });
@@ -267,7 +280,10 @@ describe("validateSpellFields", () => {
     expect(() => validateSpellFields({ components: { materialText: "x" } }, "update")).toThrow(/material is not true/);
     expect(() => validateSpellFields({ classes: [] }, "update")).toThrow(/cannot be emptied/);
     expect(() => validateSpellFields({}, "update")).toThrow(/nothing to update/);
-    expect(() => validateSpellFields({ higherLevels: [{ level: 0, effect: "Special" }] }, "update")).toThrow(/level must be 1-9/);
+    expect(() => validateSpellFields({ higherLevels: [{ level: 0, effect: "Special" }] }, "update")).toThrow(/level must be 1-20/);
+    expect(() => validateSpellFields({ ...BASE, attack: { type: "Melee" }, spellAttack: { type: "Melee" } }, "create")).toThrow(/exclusive/);
+    expect(() => validateSpellFields({ ...BASE, higherLevels: [{ level: 1, effect: "Special" }] }, "create")).toThrow(/needs "higherLevelScale"/);
+    expect(() => validateSpellFields({ modifiers: [{ type: "Damage", subType: "Fire" }], higherLevels: [{ level: 1, effect: "Special", modifier: 1 }] }, "update")).toThrow(/beyond the 1 modifiers/);
   });
 });
 
@@ -335,7 +351,7 @@ describe("createHomebrewSpell", () => {
   it("adds modifiers (subtype resolved within its type, set raw), conditions and higher-level entries, and verifies each entry's own form", async () => {
     const st = fakeDdb();
     await createHomebrewSpell({
-      ...BASE,
+      ...BASE, higherLevelScale: "Spell Scale",
       modifiers: [{ type: "Resistance", subType: "Fire", dice: { count: 8, die: 6 }, restriction: "while concentrating" }],
       conditions: [{ effect: "apply", condition: "Charmed", duration: { interval: 1, unit: "Minute" }, exception: "elves" }],
       higherLevels: [{ level: 4, effect: "Additional Targets", fixedValue: 1 }],
@@ -349,6 +365,29 @@ describe("createHomebrewSpell", () => {
     expect(cond.get("condition")).toBe("3");
     expect(cond.get("duration-unit")).toBe("2");
     expect([...st.subs.additional.values()][0].get("effect-type")).toBe("1");
+  });
+
+  it("requires a spell attack roll, and links higher-level entries to a modifier by creation order", async () => {
+    const st = fakeDdb();
+    const r = await createHomebrewSpell({
+      ...BASE, higherLevelScale: "Spell Scale", spellAttack: { type: "Ranged" },
+      modifiers: [{ type: "Damage", subType: "Fire", dice: { count: 2, die: 6 } }, { type: "Damage", subType: "Cold" }],
+      higherLevels: [{ level: 2, modifier: 0, effect: "Additional Targets", dice: { count: 1, die: 6 } }, { level: 3, modifier: 1, effect: "Extended Duration" }, { level: 1, effect: "Extended Duration" }],
+    });
+    expect(r.raw).toMatchObject({ asPartOfWeaponAttack: false, attackType: 2, requiresAttackRoll: true });
+    const [m0, m1] = [...st.subs.modifier.keys()];
+    expect([...st.subs.additional.values()].map((a) => a.get("modifier"))).toEqual([String(m0), String(m1), ""]);
+    await expect(createHomebrewSpell({ ...BASE, higherLevelScale: "Spell Scale", modifiers: [{ type: "Damage", subType: "Fire" }], higherLevels: [{ level: 1, effect: "Special", modifier: 3 }] })).rejects.toThrow(/modifier 3 is beyond the 1 modifiers/);
+  });
+
+  it("accepts DDB's own default for a condition with no duration (blank unit stored as Round)", async () => {
+    fakeDdb();
+    const handle = site.handle!;
+    site.handle = (m, p, b) => {
+      if (m === "POST" && p === "/spells/condition/create/900" && !(b as FormData).get("duration-unit")) (b as FormData).set("duration-unit", "1");
+      return handle(m, p, b);
+    };
+    await expect(createHomebrewSpell({ ...BASE, conditions: [{ effect: "apply", condition: "Blinded" }] })).resolves.toMatchObject({ id: ID });
   });
 
   it("fails naming the spell when a sub-entry did not land as asked", async () => {
@@ -391,7 +430,7 @@ describe("updateHomebrewSpell", () => {
   it("REPLACES each provided sub-entry kind — higher-level entries, then modifiers, then conditions — and leaves unmentioned kinds alone", async () => {
     const st = fakeDdb();
     await createHomebrewSpell({
-      ...BASE,
+      ...BASE, higherLevelScale: "Spell Scale",
       modifiers: [{ type: "Damage", subType: "Fire" }, { type: "Damage", subType: "Cold" }],
       conditions: [{ effect: "apply", condition: "Blinded" }],
       higherLevels: [{ level: 4, effect: "Extended Duration" }],

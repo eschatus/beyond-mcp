@@ -177,6 +177,10 @@ describe("fillItemForm", () => {
     expect(controlById(f, "field-base-weapon").values).toEqual(["301"]);
   });
 
+  it("requires a base weapon for a Weapon item (the builder rejects it live)", () => {
+    expect(() => fillItemForm(form(), { baseType: "Weapon" })).toThrow(/needs baseWeapon/);
+  });
+
   it("rejects fields the server would silently null for the base type", () => {
     expect(() => fillItemForm(form(), { baseType: "Weapon", baseWeapon: "Longsword", baseArmor: "Chain Mail" })).toThrow(/"baseArmor" doesn't apply to a Weapon/);
     expect(() => fillItemForm(form(), { baseType: "Armor", itemType: "Wand" })).toThrow(/"itemType" doesn't apply to a Armor/);
@@ -235,6 +239,14 @@ describe("createHomebrewMagicItem", () => {
     expect(st.saved!.get("charge-reset-condition")).toBe("3");
     expect(st.saved!.getAll("magic-item-tags-public")).toEqual(["11"]);
     expect(site.calls.filter((c) => c.method === "POST" && c.path === EDIT)).toHaveLength(1);
+  });
+
+  it("sends dexterityModifier only in the follow-up save (the create POST nulls it live)", async () => {
+    const st = fakeDdb();
+    await createHomebrewMagicItem({ name: "zz item", rarity: "Rare", baseType: "Armor", baseArmor: "Chain Mail", dexterityModifier: "Max 2", description: "<p>x</p>" });
+    const createPost = site.calls.find((c) => c.method === "POST" && c.path === CREATE)!.body as FormData;
+    expect(createPost.get("dexterity-modifier")).toBe("");
+    expect(st.saved!.get("dexterity-modifier")).toBe("2");
   });
 
   it("skips the follow-up save when there are no edit-only fields", async () => {

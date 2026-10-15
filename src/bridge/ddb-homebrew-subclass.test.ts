@@ -27,7 +27,7 @@ vi.mock("./ddb-rt.js", () => ({
 
 import { parseForm, controlById } from "./html-form.js";
 import {
-  createHomebrewSubclass, updateHomebrewSubclass, deleteHomebrewSubclass, fillSubclassForm, fillFeatureForm,
+  createHomebrewSubclass, updateHomebrewSubclass, deleteHomebrewSubclass, fillSubclassForm, fillFeatureForm, fillOptionForm, featureOptionIds,
   validateFeature, featureRows, featureChildren, subclassSlug, setSettleDelaysForTests,
   type HomebrewSubclassFeature,
 } from "./ddb-homebrew-subclass.js";
@@ -234,6 +234,34 @@ describe("pure helpers", () => {
     expect(asked.get("field-feature-type")).toEqual(["2"]);
     expect(asked.get("field-required-level")).toEqual(["3"]);
     expect(asked.has("field-hide-in-sheet")).toBe(false);
+  });
+
+  it("fillOptionForm sets the option trio, required level, dependent option (by label) and granted flag", () => {
+    const form = parseForm(`<form action="/classes/1-x/class-feature/9/option/create">${[
+      txt("name", "name", undefined), area("snippet", "snippet", undefined), trio("class-feature-option-description", undefined),
+      trio("multiclass-class-feature-option-description", undefined), box("is-granted", "is-granted", undefined),
+      sel("required-level", "required-level", [["3", "3"], ["6", "6"]], undefined),
+      sel("dependent-class-feature-option", "dependent-class-feature-option", [["77", "Lineage - First House"]], undefined),
+      txt("prerequisite-text", "prerequisite-text", undefined)].join("")}</form>`, /create$/);
+    const asked = fillOptionForm(form, { name: "First House", description: "<p>body text</p>", requiredLevel: 6, dependsOn: "Lineage - First House", isGranted: true, prerequisiteText: "Swords" });
+    expect(asked.get("field-required-level")).toEqual(["6"]);
+    expect(asked.get("field-dependent-class-feature-option")).toEqual(["77"]);
+    expect(asked.get("field-is-granted")).toEqual(["y"]);
+    expect(controlById(form, "field-class-feature-option-description").values).toEqual(["<p>body text</p>"]);
+    expect(asked.has("field-snippet")).toBe(false);
+    expect(() => fillOptionForm(form, { name: "x", description: "<p>body text</p>", dependsOn: "Nope - Nothing" })).toThrow();
+    // an explicit id (an update runs while the old options still carry the same label) beats the label
+    const byId = fillOptionForm(form, { name: "x", description: "<p>body text</p>", dependsOn: "Lineage - First House" }, { value: "77" });
+    expect(byId.get("field-dependent-class-feature-option")).toEqual(["77"]);
+  });
+
+  it("validateFeature checks options; featureOptionIds reads them off a feature page", () => {
+    expect(() => validateFeature({ ...FEAT_B, options: [{ name: "A", description: "<p>a</p>" }] })).toThrow(/option "A": description needs/);
+    expect(() => validateFeature({ ...FEAT_B, options: [{ name: "A", description: "<p>body</p>", requiredLevel: 0 }] })).toThrow(/requiredLevel/);
+    expect(() => validateFeature({ ...FEAT_B, options: [{ name: "A", description: "<p>body</p>" }, { name: "A", description: "<p>body</p>" }] })).toThrow(/duplicate/);
+    expect(() => validateFeature({ ...FEAT_B, hasOptions: false, options: [{ name: "A", description: "<p>body</p>" }] })).toThrow(/hasOptions is false/);
+    expect(() => validateFeature({ ...FEAT_B, options: [{ name: "A", description: "<p>body</p>", requiredLevel: 3 }] })).not.toThrow();
+    expect(featureOptionIds(`<a href="/classes/1-x/class-feature/9/option/5/edit">e</a><a href="/classes/1-x/class-feature/9/option/5/edit">e</a><a href="/classes/1-x/class-feature/9/option/6/edit">e</a>`)).toEqual([5, 6]);
   });
 
   it("reads the slug, feature table and child tables off pages", () => {

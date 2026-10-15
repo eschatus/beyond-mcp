@@ -67,8 +67,10 @@ function builder(action: string, saved?: Saved): string {
     txt("initiative-bonus", "fa1", saved),
     sel("hit-points-die-value", [["8", "d8"], ["10", "d10"]], saved),
     ...ABILITIES.map((k, i) => txt(k, `fh${i}`, saved)),
-    ...["monster-saving-throw", "damage-adjustment", "condition-immunity", "monster-environments", "monster-tags-public"].map((k) => sel(k, [["1", "One"]], saved, true)),
+    sel("monster-saving-throw", [["1", "STR"], ["2", "DEX"], ["3", "CON"], ["4", "INT"], ["5", "WIS"], ["6", "CHA"]], saved, true),
+    ...["damage-adjustment", "condition-immunity", "monster-environments", "monster-tags-public"].map((k) => sel(k, [["1", "One"]], saved, true)),
     sel("treasure", [["4", "Relics"]], saved, true),
+    ...(action === EDIT ? ABILITIES.map((k, i) => txt(`${k}-save-bonus`, `fs${i}`, saved)) : []),
     `<input type="file" id="field-avatar" name="fav" /></form>`,
   ].join("\n");
 }
@@ -112,6 +114,34 @@ describe("fillMonsterForm", () => {
     expect(controlById(f, "field-actions-description").values).toEqual(["<p>Template actions</p>"]);
     expect(controlById(f, "field-is-legendary").values).toEqual([]);
     expect(controlById(f, "field-legendary-actions-description").values).toEqual([""]);
+  });
+});
+
+describe("saveBonuses", () => {
+  it("fills the edit-only save-bonus controls, blanking the unspecified abilities", () => {
+    const f = parseForm(builder(EDIT), /edit$/);
+    const asked = fillMonsterForm(f, { savingThrows: ["WIS", "CHA"], saveBonuses: { WIS: 1, CHA: 2 } }, false);
+    expect(asked.get("field-wisdom-save-bonus")).toEqual(["1"]);
+    expect(asked.get("field-charisma-save-bonus")).toEqual(["2"]);
+    expect(asked.get("field-strength-save-bonus")).toEqual([""]);
+  });
+  it("refuses a bonus for an ability that is not a save proficiency", () => {
+    const f = parseForm(builder(EDIT), /edit$/);
+    expect(() => fillMonsterForm(f, { savingThrows: ["WIS"], saveBonuses: { DEX: 1 } }, false)).toThrow(/need the same abilities in savingThrows/);
+  });
+  it("is checked against monster-service's bonusModifier", () => {
+    const f = { ...BASE, savingThrows: ["WIS"], saveBonuses: { WIS: 1 } };
+    expect(verifyLabels({ ...RAW, savingThrows: [{ statId: 5, bonusModifier: 1 }] }, f)).toEqual([]);
+    expect(verifyLabels({ ...RAW, savingThrows: [{ statId: 5, bonusModifier: null }] }, f)).toEqual([`WIS save bonus: asked 1, DDB reads back 0`]);
+  });
+  it("is applied by a follow-up edit save on create (the create form has no such controls)", async () => {
+    const state = fakeDdb();
+    rtGetHomebrewMonster.mockResolvedValue({ ...RAW, savingThrows: [{ statId: 5, bonusModifier: 1 }] });
+    await createHomebrewMonster({ ...BASE, savingThrows: ["WIS"], saveBonuses: { WIS: 1 } });
+    const createPost = site.calls.find((c) => c.method === "POST" && c.path.includes("create-monster"))!.body as FormData;
+    expect(createPost.has("fs4")).toBe(false);
+    expect(state.saved!.get("fs4")).toBe("1");
+    expect(state.saved!.get("Name")).toBe("Imp");
   });
 });
 

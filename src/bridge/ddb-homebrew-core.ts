@@ -92,7 +92,9 @@ export function verifyEditForm(asked: Asked, edit: ParsedForm): string[] {
 // A passing read can't be a false positive in practice: a stale replica shows the OLD state, which
 // can only match the asked state if nothing was changed.
 
-export const SETTLE_DELAYS_MS = [1000, 2000, 4000, 8000, 15000];
+// ~60s in all. 30s proved too short live: game-data/feats took longer than that to list 3 of 15 freshly
+// created feats (2026-10-13), turning successful creates into spurious verification failures.
+export const SETTLE_DELAYS_MS = [1000, 2000, 4000, 8000, 15000, 30000];
 
 export async function settle<T>(read: () => Promise<{ value: T; mismatches: string[] }>, delaysMs: readonly number[] = SETTLE_DELAYS_MS): Promise<{ value: T; mismatches: string[] }> {
   let last = await read();

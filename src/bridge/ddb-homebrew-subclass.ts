@@ -30,6 +30,10 @@ import {
   getPage, loadForm, submit, ajaxPost, verifyEditForm, deleteCreation, resolveEditPath, settle, SETTLE_DELAYS_MS,
   embeddedSubTypes, fillModifierForm, type Asked, type HomebrewModifier,
 } from "./ddb-homebrew-core.js";
+import {
+  addLimitedUse, verifyLimitedUse, addEntitySpell, verifyEntitySpell, listLimitedUses, listEntitySpells,
+  type HomebrewLimitedUse, type HomebrewEntitySpell,
+} from "./ddb-homebrew-entity.js";
 
 export type { HomebrewModifier } from "./ddb-homebrew-core.js";
 
@@ -39,6 +43,8 @@ export function setSettleDelaysForTests(d: readonly number[]): void { settleDela
 
 export const SUBCLASS_ENTITY_TYPE_ID = 789467139;          // same id as classes
 export const CLASS_FEATURE_ENTITY_TYPE_ID = 12168134;
+/** Owner type of a class-feature OPTION (live 2026-10-13: the option edit page links /modifier|spell|limited-use/create/{optId}-258900837). */
+export const CLASS_FEATURE_OPTION_ENTITY_TYPE_ID = 258900837;
 
 // --- caller-facing field model (labels, not DDB ids) ---
 
@@ -52,6 +58,31 @@ export interface HomebrewLevelScale {
   dice?: { count: number; die: 4 | 6 | 8 | 10 | 12 | 20 };
   fixedValue?: number;
   description?: string;
+}
+
+/**
+ * A choosable option of a feature (`/classes/{sub}/class-feature/{fid}/option/create`). Replace semantics
+ * come with the feature: a provided features list recreates every option. Options own modifiers, limited-use
+ * actions and spell grants exactly like a feature does (owner type 258900837).
+ */
+export interface HomebrewFeatureOption {
+  name: string;
+  snippet?: string;
+  description: string;                 // HTML
+  multiclassDescription?: string;      // HTML
+  /** "Is Granted": the option is always given instead of chosen. */
+  isGranted?: boolean;
+  /** Character level at which the option unlocks (1-20). */
+  requiredLevel?: number;
+  /**
+   * Only offered when another option is chosen: that option as the builder labels it, "Feature name - Option name"
+   * (e.g. "Lineage - First House"). The target must belong to a feature created EARLIER in the same list.
+   */
+  dependsOn?: string;
+  prerequisiteText?: string;
+  modifiers?: HomebrewModifier[];
+  limitedUses?: HomebrewLimitedUse[];
+  spells?: HomebrewEntitySpell[];
 }
 
 export interface HomebrewSubclassFeature {
@@ -68,6 +99,12 @@ export interface HomebrewSubclassFeature {
   hideInSheet?: boolean;
   modifiers?: HomebrewModifier[];
   levelScales?: HomebrewLevelScale[];
+  /** Choosable options; "has options" is switched on automatically. */
+  options?: HomebrewFeatureOption[];
+  /** Limited-use actions of the feature (shared entity form). */
+  limitedUses?: HomebrewLimitedUse[];
+  /** Spell grants of the feature (shared entity form); one entry = one DDB row. */
+  spells?: HomebrewEntitySpell[];
 }
 
 export interface HomebrewSubclassSpellcasting {
@@ -153,6 +190,35 @@ export function validateFeature(f: HomebrewSubclassFeature): void {
   if (!Number.isInteger(f.level) || f.level < 1 || f.level > 20) throw new Error(`ddb-homebrew-subclass: ${who}: level must be an integer 1-20`);
   if (textOf(f.description).length < 4) throw new Error(`ddb-homebrew-subclass: ${who}: description needs at least 4 characters of text (the builder rejects less)`);
   if (!["Granted", "Additional", "Replacement"].includes(f.type)) throw new Error(`ddb-homebrew-subclass: ${who}: type must be Granted, Additional or Replacement`);
+  const seen = new Set<string>();
+  for (const o of f.options ?? []) {
+    const ow = `${who} option "${o.name}"`;
+    if (!o.name.trim() || o.name.length > 1024) throw new Error(`ddb-homebrew-subclass: ${ow}: name must be 1-1024 characters`);
+    if (seen.has(o.name)) throw new Error(`ddb-homebrew-subclass: ${ow}: duplicate option name in one feature`);
+    seen.add(o.name);
+    if (textOf(o.description).length < 4) throw new Error(`ddb-homebrew-subclass: ${ow}: description needs at least 4 characters of text`);
+    if (o.requiredLevel !== undefined && (!Number.isInteger(o.requiredLevel) || o.requiredLevel < 1 || o.requiredLevel > 20)) throw new Error(`ddb-homebrew-subclass: ${ow}: requiredLevel must be an integer 1-20`);
+    if (f.hasOptions === false) throw new Error(`ddb-homebrew-subclass: ${who}: hasOptions is false but options were given`);
+  }
+}
+
+/** Fill the option form (/option/create and /option/{id}/edit share it). Returns what an edit page must read back. */
+export function fillOptionForm(form: ParsedForm, o: HomebrewFeatureOption, dependsOnValue?: OptionValue): Asked {
+  const asked: Asked = new Map();
+  const set = (id: string, v: ControlValue | undefined) => {
+    if (v === undefined) return;
+    setControl(form, id, v);
+    asked.set(id, [...controlById(form, id).values]);
+  };
+  set("field-name", o.name);
+  set("field-snippet", o.snippet);
+  setDescription(form, "class-feature-option-description", o.description);
+  if (o.multiclassDescription !== undefined) setDescription(form, "multiclass-class-feature-option-description", o.multiclassDescription);
+  set("field-is-granted", o.isGranted);
+  set("field-required-level", o.requiredLevel === undefined ? undefined : String(o.requiredLevel));
+  set("field-dependent-class-feature-option", dependsOnValue ?? o.dependsOn);
+  set("field-prerequisite-text", o.prerequisiteText);
+  return asked;
 }
 
 /** Fill the class-feature form. Returns what an edit page must read back (descriptions excluded). */
@@ -169,7 +235,7 @@ export function fillFeatureForm(form: ParsedForm, f: HomebrewSubclassFeature): A
   if (f.multiclassDescription !== undefined) setDescription(form, "multiclass-class-feature-description", f.multiclassDescription);
   set("field-required-level", String(f.level));
   set("field-display-order-field", f.displayOrder === undefined ? undefined : String(f.displayOrder));
-  set("field-has-options", f.hasOptions);
+  set("field-has-options", f.hasOptions ?? (f.options?.length ? true : undefined));
   set("field-display-required-level", f.displayRequiredLevel);
   set("field-hide-in-builder", f.hideInBuilder);
   set("field-hide-in-sheet", f.hideInSheet);
@@ -232,36 +298,84 @@ const siteUrl = (path: string) => `https://www.dndbeyond.com${path}`;
 
 // --- features ---
 
+type AddedActions = Awaited<ReturnType<typeof addLimitedUse>>[];
+type AddedSpells = Awaited<ReturnType<typeof addEntitySpell>>[];
+
+interface PlacedOption {
+  id: number;
+  spec: HomebrewFeatureOption;
+  asked: Asked;
+  modifiers: string[];
+  limitedUses: AddedActions;
+  spells: AddedSpells;
+}
+
 interface Placed {
   id: number;
   spec: HomebrewSubclassFeature;
   asked: Asked;
   modifiers: string[];      // the labels the modifier table must list, e.g. "Resistance - Fire"
   levelScales: string[][];  // [level, dice, fixed, description] rows the level-scale table must list
+  limitedUses: AddedActions;
+  spells: AddedSpells;
+  options: PlacedOption[];
+}
+
+/** Add one modifier to a feature / option owner; returns the label its table row must show. */
+async function addModifier(s: SiteSession, ownerId: number, ownerTypeId: number, m: HomebrewModifier): Promise<string> {
+  const html = await getPage(s, `/modifier/create/${ownerId}-${ownerTypeId}/0`);
+  const mform = parseForm(html, /modifier\/create/);
+  const { typeId, subTypeId } = fillModifierForm(mform, html, m);
+  const typeLabel = controlById(mform, "field-spell-modifier-type").options.find((o) => o.value === String(typeId))?.label ?? "";
+  const subName = embeddedSubTypes(html).find((x) => x.id === subTypeId)?.name ?? "";
+  await submit(s, mform, `add modifier to owner ${ownerId}-${ownerTypeId}`);
+  return `${typeLabel} - ${subName}`;
+}
+
+/** Limited-use actions and spell grants of one owner (feature or option), each added once. */
+async function addEntities(s: SiteSession, ownerId: number, ownerTypeId: number, spec: { limitedUses?: HomebrewLimitedUse[]; spells?: HomebrewEntitySpell[] }): Promise<{ limitedUses: AddedActions; spells: AddedSpells }> {
+  const limitedUses: AddedActions = [];
+  const spells: AddedSpells = [];
+  for (const a of spec.limitedUses ?? []) limitedUses.push(await addLimitedUse(s, ownerId, ownerTypeId, a));
+  for (const sp of spec.spells ?? []) spells.push(await addEntitySpell(s, ownerId, ownerTypeId, sp));
+  return { limitedUses, spells };
+}
+
+/** Option labels ("Feature - Option") created so far in this call -> their ids: an update runs while the OLD options still exist, so a label alone would be ambiguous. */
+type CreatedOptions = Map<string, string>;
+
+async function createOption(s: SiteSession, slug: string, fid: number, featureName: string, o: HomebrewFeatureOption, created: CreatedOptions): Promise<PlacedOption> {
+  const form = await loadForm(s, `/classes/${slug}/class-feature/${fid}/option/create`, /option\/create$/);
+  const target = o.dependsOn === undefined ? undefined : created.get(o.dependsOn);
+  const asked = fillOptionForm(form, o, target === undefined ? undefined : { value: target });
+  const location = await submit(s, form, `create option "${o.name}" on feature ${fid}`);
+  const id = location.match(/\/option\/(\d+)\/edit/)?.[1];
+  if (!id) throw new DdbWriteError(`ddb-homebrew-subclass: create option "${o.name}": unexpected redirect ${location}`, 302, location);
+  const oid = Number(id);
+  created.set(`${featureName} - ${o.name}`, id);
+  const placed: PlacedOption = { id: oid, spec: o, asked, modifiers: [], limitedUses: [], spells: [] };
+  try {
+    for (const m of o.modifiers ?? []) placed.modifiers.push(await addModifier(s, oid, CLASS_FEATURE_OPTION_ENTITY_TYPE_ID, m));
+    Object.assign(placed, await addEntities(s, oid, CLASS_FEATURE_OPTION_ENTITY_TYPE_ID, o));
+  } catch (err) {
+    throw new DdbWriteError(`option "${o.name}" was created (id ${oid}), then: ${(err as Error).message}`, (err as DdbWriteError).status ?? 500, (err as DdbWriteError).detail ?? null);
+  }
+  return placed;
 }
 
 const levelScaleRow = (l: HomebrewLevelScale) => [String(l.level), l.dice ? `${l.dice.count}d${l.dice.die}` : "", l.fixedValue === undefined ? "" : String(l.fixedValue), l.description ?? ""];
 
 /** Create one feature with its modifiers and level scales. Each POST is made once; nothing here retries. */
-async function createFeature(s: SiteSession, slug: string, f: HomebrewSubclassFeature): Promise<Placed> {
+async function createFeature(s: SiteSession, slug: string, f: HomebrewSubclassFeature, created: CreatedOptions): Promise<Placed> {
   const form = await loadForm(s, `/classes/${slug}/class-feature/create`, /class-feature\/create$/);
   const asked = fillFeatureForm(form, f);
   const location = await submit(s, form, `create feature "${f.name}"`);
   const id = location.match(/\/class-feature\/(\d+)\/edit/)?.[1];
   if (!id) throw new DdbWriteError(`ddb-homebrew-subclass: create feature "${f.name}": unexpected redirect ${location}`, 302, location);
   const fid = Number(id);
-  const placed: Placed = { id: fid, spec: f, asked, modifiers: [], levelScales: [] };
+  const placed: Placed = { id: fid, spec: f, asked, modifiers: [], levelScales: [], limitedUses: [], spells: [], options: [] };
   try {
-    for (const m of f.modifiers ?? []) {
-      const path = `/modifier/create/${fid}-${CLASS_FEATURE_ENTITY_TYPE_ID}/0`;
-      const html = await getPage(s, path);
-      const mform = parseForm(html, /modifier\/create/);
-      const { typeId, subTypeId } = fillModifierForm(mform, html, m);
-      const typeLabel = controlById(mform, "field-spell-modifier-type").options.find((o) => o.value === String(typeId))?.label ?? "";
-      const subName = embeddedSubTypes(html).find((x) => x.id === subTypeId)?.name ?? "";
-      await submit(s, mform, `add modifier to feature ${fid}`);
-      placed.modifiers.push(`${typeLabel} - ${subName}`);
-    }
+    for (const m of f.modifiers ?? []) placed.modifiers.push(await addModifier(s, fid, CLASS_FEATURE_ENTITY_TYPE_ID, m));
     for (const l of f.levelScales ?? []) {
       const lform = await loadForm(s, `/entity/levelscale/create/${fid}-${CLASS_FEATURE_ENTITY_TYPE_ID}`, /levelscale\/create/);
       setControl(lform, "field-level", String(l.level));
@@ -271,6 +385,8 @@ async function createFeature(s: SiteSession, slug: string, f: HomebrewSubclassFe
       await submit(s, lform, `add level scale to feature ${fid}`);
       placed.levelScales.push(levelScaleRow(l));
     }
+    Object.assign(placed, await addEntities(s, fid, CLASS_FEATURE_ENTITY_TYPE_ID, f));
+    for (const o of f.options ?? []) placed.options.push(await createOption(s, slug, fid, f.name, o, created));
   } catch (err) {
     throw new DdbWriteError(`ddb-homebrew-subclass: feature "${f.name}" was created (id ${fid}), then: ${(err as Error).message}`, (err as DdbWriteError).status ?? 500, (err as DdbWriteError).detail ?? null);
   }
@@ -281,6 +397,35 @@ async function createFeature(s: SiteSession, slug: string, f: HomebrewSubclassFe
 
 const sortedJson = (xs: unknown[]) => xs.map((x) => JSON.stringify(x)).sort();
 const same = (a: unknown[], b: unknown[]) => JSON.stringify(sortedJson(a)) === JSON.stringify(sortedJson(b));
+
+const OPTION_EDIT_ACTION = /\/option\/\d+\/edit$/;
+
+/** Ids of the options listed on a feature edit page. */
+export function featureOptionIds(html: string): number[] {
+  return [...html.matchAll(/class-feature\/\d+\/option\/(\d+)\/edit"/g)].map((m) => Number(m[1])).filter((v, i, a) => a.indexOf(v) === i);
+}
+
+/** Read back the actions / spell grants an owner page carries against what was added (counts, then each row's own edit page). */
+async function verifyEntities(s: SiteSession, ownerHtml: string, p: { limitedUses: AddedActions; spells: AddedSpells }, who: string): Promise<string[]> {
+  const out: string[] = [];
+  const lu = listLimitedUses(ownerHtml), sp = listEntitySpells(ownerHtml);
+  if (lu.length !== p.limitedUses.length) out.push(`${who}: lists ${lu.length} limited-use actions, added ${p.limitedUses.length}`);
+  if (sp.length !== p.spells.length) out.push(`${who}: lists ${sp.length} spell grants, added ${p.spells.length}`);
+  for (const a of p.limitedUses) { try { await verifyLimitedUse(s, a); } catch (err) { out.push(`${who}: ${(err as Error).message}`); } }
+  for (const a of p.spells) { try { await verifyEntitySpell(s, a); } catch (err) { out.push(`${who}: ${(err as Error).message}`); } }
+  return out;
+}
+
+async function verifyOption(s: SiteSession, slug: string, fid: number, o: PlacedOption, who: string): Promise<string[]> {
+  let html: string;
+  try { html = await getPage(s, `/classes/${slug}/class-feature/${fid}/option/${o.id}/edit`); }
+  catch (err) { return [`${who}: edit page unreadable — ${(err as Error).message}`]; }
+  const out = verifyEditForm(o.asked, parseForm(html, OPTION_EDIT_ACTION)).map((m) => `${who}: ${m}`);
+  const kids = featureChildren(html);
+  if (!same(kids.modifiers, o.modifiers)) out.push(`${who}: modifiers asked ${JSON.stringify(o.modifiers)}, DDB lists ${JSON.stringify(kids.modifiers)}`);
+  out.push(...(await verifyEntities(s, html, o, who)));
+  return out;
+}
 
 /** Mismatches between the features asked and the subclass page's table + each feature's own edit page. */
 async function verifyFeatures(s: SiteSession, slug: string, rows: TableRow[], placed: Placed[]): Promise<string[]> {
@@ -301,6 +446,10 @@ async function verifyFeatures(s: SiteSession, slug: string, rows: TableRow[], pl
     try { html = await getPage(s, `/classes/${slug}/class-feature/${p.id}/edit`); }
     catch (err) { out.push(`${who}: edit page unreadable — ${(err as Error).message}`); continue; }
     out.push(...verifyEditForm(p.asked, parseForm(html, FEATURE_EDIT_ACTION)).map((m) => `${who}: ${m}`));
+    out.push(...(await verifyEntities(s, html, p, who)));
+    for (const o of p.options) out.push(...(await verifyOption(s, slug, p.id, o, `${who} option "${o.spec.name}" (${o.id})`)));
+    const optIds = featureOptionIds(html);
+    if (optIds.length !== p.options.length) out.push(`${who}: lists ${optIds.length} options, asked ${p.options.length}`);
     const kids = featureChildren(html);
     if (!same(kids.modifiers, p.modifiers)) out.push(`${who}: modifiers asked ${JSON.stringify(p.modifiers)}, DDB lists ${JSON.stringify(kids.modifiers)}`);
     if (!same(kids.levelScales, p.levelScales)) out.push(`${who}: level scales asked ${JSON.stringify(p.levelScales)}, DDB lists ${JSON.stringify(kids.levelScales)}`);
@@ -373,7 +522,8 @@ export async function createHomebrewSubclass(f: HomebrewSubclassCreate): Promise
   // The subclass exists from here on; a later failure must name it so the caller can fix or delete it.
   try {
     const placed: Placed[] = [];
-    for (const feat of features) placed.push(await createFeature(s, subclassSlug(body), feat));
+    const created: CreatedOptions = new Map();
+    for (const feat of features) placed.push(await createFeature(s, subclassSlug(body), feat, created));
     return await verifyOrThrow(s, id, editPath, Number(parent[2]), asked, f.features === undefined ? undefined : placed);
   } catch (err) {
     const e = err instanceof DdbWriteError ? err : null;
@@ -403,8 +553,9 @@ export async function updateHomebrewSubclass(id: number, f: HomebrewSubclassFiel
     // Create the new set first, then drop the old: a failure part-way leaves extra features, never fewer.
     const old = featureRows(before);
     placed = [];
+    const created: CreatedOptions = new Map();
     try {
-      for (const feat of features) placed.push(await createFeature(s, slug, feat));
+      for (const feat of features) placed.push(await createFeature(s, slug, feat, created));
       for (const row of old) await ajaxPost(s, `/classes/${slug}/class-feature/${row.id}/delete`, `remove feature ${row.id} from subclass ${id}`);
     } catch (err) {
       const e = err instanceof DdbWriteError ? err : null;

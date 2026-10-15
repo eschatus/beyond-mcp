@@ -31,7 +31,7 @@ import { parseForm, controlById } from "./html-form.js";
 import { DdbWriteError } from "./ddb-write.js";
 import {
   createHomebrewSpecies, updateHomebrewSpecies, deleteHomebrewSpecies, fillSpeciesForm, fillTraitForm, parseSpeciesPage,
-  parseModifierListing, verifyRaceJson, validateTrait, setSettleDelaysForTests, type HomebrewSpeciesTrait,
+  parseModifierListing, verifyRaceJson, validateTrait, validateOption, fillTraitOptionForm, parseTraitOptionListing, setSettleDelaysForTests, type HomebrewSpeciesTrait,
 } from "./ddb-homebrew-species.js";
 
 // --- a stateful fake of the species builder: POSTs store, pages render what was stored ---
@@ -210,6 +210,28 @@ describe("pure helpers", () => {
     expect(() => validateTrait({ ...DARK, requiredLevel: 21 }, 0)).toThrow(/requiredLevel/);
   });
 
+  it("validates choices, actions and spell grants under a trait, and an option's own traits, before any request", () => {
+    const opt = { name: "Heavy Plating", snippet: "Base AC 15.", description: "<p>x</p>" };
+    expect(() => validateTrait({ ...DARK, traitOptions: [{ ...opt, snippet: "" }] }, 0)).toThrow(/trait option #1.*snippet/);
+    expect(() => validateTrait({ ...DARK, traitOptions: [{ ...opt, requiredLevel: 0 }] }, 0)).toThrow(/requiredLevel/);
+    expect(() => validateTrait({ ...DARK, traitOptions: [opt] }, 0)).not.toThrow();
+    // uses without a reset are refused by the shared entity validator
+    expect(() => validateTrait({ ...DARK, actions: [{ name: "Frenzy", actionType: "General", uses: { count: 1 } }] }, 0)).toThrow(/reset/);
+    expect(() => validateOption({ name: "Variant A", description: "<p>x</p>", traits: [{ ...DARK, snippet: "" }] }, 0)).toThrow(/snippet/);
+    expect(() => validateOption({ name: "G", description: "<p>x</p>" }, 2)).toThrow(/option #3/);
+  });
+
+  it("fills the trait-option form (class-feature-option description trio) and parses the choice listing", () => {
+    const html = `<form method="post" action="/entity/species-trait/9/species-trait-option/create"><input id="field-name" name="name" type="text" value=""/>`
+      + `<textarea id="field-snippet" name="snippet"></textarea>${trio("class-feature-option-description", undefined)}`
+      + `${select("required-level", [["1", "1"], ["2", "2"]], undefined)}${box("is-granted", false)}</form>`;
+    const asked = fillTraitOptionForm(parseForm(html, /species-trait-option\/create/), { name: "Heavy Plating", snippet: "AC 15", description: "<p>d</p>", requiredLevel: 2 });
+    expect(asked.get("field-required-level")).toEqual(["2"]);
+    expect(asked.get("field-is-granted")).toEqual([]);
+    const rows = `<table><tr><td> Heavy Plating </td><td></td><td> No </td><td><a href="/entity/species-trait/9/species-trait-option/55/edit">Edit</a></td></tr></table>`;
+    expect(parseTraitOptionListing(rows)).toEqual([{ id: 55, name: "Heavy Plating", granted: "No" }]);
+  });
+
   it("asks level 1 back as blank (DDB stores the default as empty) and sets every checkbox explicitly", () => {
     fakeDdb();
     const form = parseForm(traitFormHtml(), /trait/);
@@ -356,7 +378,7 @@ describe("updateHomebrewSpecies", () => {
     const err = await updateHomebrewSpecies(50, { traits: [WARD] }).catch((e) => e);
     expect(err).toBeInstanceOf(DdbWriteError);
     expect(err.message).toMatch(/species 50/);
-    expect(err.message).toMatch(/traits: asked ids \[901\], the species lists \[900, 901\]/);
+    expect(err.message).toMatch(/traits: asked ids \[901\], the owner lists \[900, 901\]/);
     void st;
   });
 });

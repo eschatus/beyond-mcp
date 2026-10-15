@@ -48,7 +48,13 @@ export interface HomebrewSpellCondition {
   hide?: boolean;
 }
 export interface HomebrewSpellHigherLevel {
-  level: number;                                  // the slot level this entry applies from
+  /** Meaning depends on the spell's scale (live-verified): Spell Scale = the interval ("every N slot levels above the spell's own");
+   *  Character Level = the character level where the change occurs (dice are ABSOLUTE there: 2d10 at 5, 3d10 at 11);
+   *  Spell Level = the slot level that triggers the effect. */
+  level: number;
+  /** Index into this call's `modifiers` (or, on an update that leaves modifiers alone, into the spell's existing ones in creation
+   *  order): the modifier this entry scales. DDB then stores the entry on that modifier (how Fireball's +1d6 is built). */
+  modifier?: number;
   effect: string;                                 // "Additional Targets", "Extended Range", …
   dice?: { count: number; die: SpellDie };
   fixedValue?: number;
@@ -75,7 +81,9 @@ export interface HomebrewSpellFields {
   classes?: Array<string | OptionValue>;          // class-mapping labels, or { value } when a label repeats
   // --- edit-only fields (applied by a follow-up save after create) ---
   areaOfEffect?: { type: string; size: number } | null;
-  attack?: { type: "Melee" | "Ranged" } | null;   // ticks "as part of weapon attack"
+  attack?: { type: "Melee" | "Ranged" } | null;   // ticks "as part of weapon attack"; type = the affected weapon's range type
+  /** The spell itself requires a spell attack roll (attack type WITHOUT the weapon-attack box; DDB flags requiresAttackRoll). */
+  spellAttack?: { type: "Melee" | "Ranged" } | null;
   /** Replaces the group: omitted texts are cleared. */
   save?: { ability: string; onMiss?: string; onSuccess?: string; onFail?: string } | null;
   tags?: string[];
@@ -85,7 +93,7 @@ export interface HomebrewSpellFields {
   higherLevels?: HomebrewSpellHigherLevel[];
 }
 
-const EDIT_ONLY = ["areaOfEffect", "attack", "save", "tags"] as const;
+const EDIT_ONLY = ["areaOfEffect", "attack", "spellAttack", "save", "tags"] as const;
 const SUB_FIELDS = ["modifiers", "conditions", "higherLevels"] as const;
 type SubKind = (typeof SUB_FIELDS)[number];
 
@@ -109,10 +117,14 @@ export function validateSpellFields(f: HomebrewSpellFields, mode: "create" | "up
   if (f.range?.feet !== undefined && !(Number.isInteger(f.range.feet) && f.range.feet >= 0)) bad(`range.feet must be a non-negative integer`);
   if (f.duration && (f.duration.interval === undefined) !== (f.duration.unit === undefined)) bad(`duration.interval and duration.unit go together — give both or neither`);
   if (f.areaOfEffect && !(Number.isInteger(f.areaOfEffect.size) && f.areaOfEffect.size >= 0)) bad(`areaOfEffect.size must be a non-negative integer`);
+  if (f.attack && f.spellAttack) bad(`"attack" (part of a weapon attack) and "spellAttack" (the spell makes the roll) are exclusive — DDB has one attack-type control`);
+  if (mode === "create" && f.higherLevels?.length && !f.higherLevelScale) bad(`"higherLevels" needs "higherLevelScale" (DDB ignores the entries until scaling is enabled)`);
   if (f.save && !f.save.ability) bad(`save.ability is required when save is given`);
   for (const [i, h] of (f.higherLevels ?? []).entries()) {
-    if (!Number.isInteger(h.level) || h.level < 1 || h.level > 9) bad(`higherLevels[${i}].level must be 1-9`);
+    if (!Number.isInteger(h.level) || h.level < 1 || h.level > 20) bad(`higherLevels[${i}].level must be 1-20 (an interval, slot level or character level)`);
     if (!h.effect) bad(`higherLevels[${i}].effect is required`);
+    if (h.modifier !== undefined && !(Number.isInteger(h.modifier) && h.modifier >= 0)) bad(`higherLevels[${i}].modifier must be a modifier index (0, 1, …)`);
+    if (h.modifier !== undefined && f.modifiers && h.modifier >= f.modifiers.length) bad(`higherLevels[${i}].modifier ${h.modifier} is beyond the ${f.modifiers.length} modifiers given`);
   }
   for (const [i, c] of (f.conditions ?? []).entries()) {
     if (!["apply", "remove", "suppress"].includes(c.effect)) bad(`conditions[${i}].effect must be apply, remove or suppress`);
@@ -187,6 +199,10 @@ export function fillSpellForm(form: ParsedForm, f: HomebrewSpellFields): Asked {
     if (f.attack === null) { set("field-as-part-of-weapon-attack", false); clear("field-attack-type"); }
     else { set("field-as-part-of-weapon-attack", true); set("field-attack-type", f.attack.type); }
   }
+  if (f.spellAttack !== undefined) {
+    set("field-as-part-of-weapon-attack", false);
+    if (f.spellAttack === null) clear("field-attack-type"); else set("field-attack-type", f.spellAttack.type);
+  }
   if (f.save !== undefined) {
     if (f.save === null) { clear("field-spell-save-type"); for (const id of ["field-on-miss", "field-spell-save-success", "field-spell-save-fail"]) text(id, undefined); }
     else {
@@ -228,6 +244,9 @@ function signature(form: ParsedForm, html: string, ids: string[]): string {
       return ["apply", "remove", "suppress"].find((e) => controlById(form, `field-condition-effect-${e}`).values.length) ?? "";
     }
     const raw = controlById(form, id).values.map((v) => v.trim()).join(",");
+    // A condition with no duration is stored as 0 Rounds: the blank unit comes back as Round (id 1), live 2026-10-13.
+    // (Posting Round explicitly with no duration is refused: "You must specify a positive number for the duration.")
+    if (id === "field-duration-unit" && ids.includes("field-condition-duration") && raw === "" && !Number(controlById(form, "field-condition-duration").values[0] || 0)) return "1";
     // A blank numeric reads back as "0" or "" depending on the field; they mean the same.
     return NUMERIC_IDS.has(id) ? String(Number(raw || 0)) : raw;
   };
@@ -269,9 +288,15 @@ const SUBS: { [K in SubKind]: SubSpec<NonNullable<HomebrewSpellFields[K]>[number
   higherLevels: {
     kind: "additional",
     deleteLink: /href="\/spells\/additional\/(\d+)\/delete"/g,
-    sigIds: ["field-level", "field-effect-type", "field-dice-count", "field-dice-value", "field-dice-fixed", "field-dice-details"],
+    sigIds: ["field-level", "field-modifier", "field-effect-type", "field-dice-count", "field-dice-value", "field-dice-fixed", "field-dice-details"],
     fill(form, _html, h: HomebrewSpellHigherLevel) {
       setControl(form, "field-level", h.level);
+      if (h.modifier !== undefined) {
+        // The select lists this spell's modifiers as "Damage - Fire (1d8)" — labels can repeat, so pick by creation order (ids ascend).
+        const ids = controlById(form, "field-modifier").options.map((o) => o.value).filter((v) => v !== "").sort((a, b) => Number(a) - Number(b));
+        if (h.modifier >= ids.length) throw new Error(`modifier ${h.modifier} does not exist — the spell has ${ids.length} modifier(s)`);
+        controlById(form, "field-modifier").values = [ids[h.modifier]];
+      }
       setControl(form, "field-effect-type", h.effect);
       if (h.dice) { setControl(form, "field-dice-count", h.dice.count); setControl(form, "field-dice-value", `d${h.dice.die}`); }
       if (h.fixedValue !== undefined) setControl(form, "field-dice-fixed", h.fixedValue);
@@ -382,12 +407,23 @@ export function verifyDefinition(def: any, f: HomebrewSpellFields, asked: Asked)
     eq("areaOfEffect.size", f.areaOfEffect?.size ?? 0, def.range?.aoeValue ?? 0);
   }
   if (f.attack !== undefined) eq("attack (as weapon attack)", f.attack !== null, def.asPartOfWeaponAttack);
+  if (f.spellAttack !== undefined) {
+    eq("spellAttack (not a weapon attack)", false, def.asPartOfWeaponAttack);
+    eq("spellAttack.type (option id)", f.spellAttack === null ? "" : asked.get("field-attack-type")?.[0], def.attackType ?? "");
+    if (f.spellAttack !== null) eq("requiresAttackRoll", true, def.requiresAttackRoll);
+  }
   if (f.save !== undefined) eq("save.ability (option id)", f.save === null ? "" : asked.get("field-spell-save-type")?.[0], def.saveDcAbilityId);
   if (f.tags !== undefined) {
     const norm = (xs: unknown[]) => JSON.stringify(xs.map((x) => String(x).toLowerCase()).sort());
     eq("tags", norm(f.tags), norm(def.tags ?? []));
   }
   if (f.modifiers !== undefined) eq("modifiers (count)", f.modifiers.length, def.modifiers?.length ?? 0);
+  if (f.higherLevels !== undefined && def.canCastAtHigherLevel) {
+    // Entries sit in atHigherLevels, or on the modifier they scale; both are lists of lists.
+    const count = (ahl: any) => Object.values(ahl ?? {}).reduce<number>((n, l) => n + (Array.isArray(l) ? l.length : 0), 0);
+    const got = count(def.atHigherLevels) + (def.modifiers ?? []).reduce((n: number, m: any) => n + count(m?.atHigherLevels), 0);
+    eq("higherLevels (count)", f.higherLevels.length, got);
+  }
   if (f.conditions !== undefined) eq("conditions (count)", f.conditions.length, def.conditions?.length ?? 0);
   return out;
 }
@@ -405,13 +441,16 @@ async function verifyOrThrow(s: SiteSession, spellId: number, editPath: string, 
     const edit = parseForm(editHtml, /\/edit$/);
     const mism = [...verifyEditForm(asked, edit), ...await verifySubEntries(s, editHtml, expected)];
     const mapped = controlById(edit, "field-class-mapping");
-    // Prefer a base class: subclass-only mappings may not be listed under their own id.
-    const classId = mapped.values.find((v) => !/ - |\(Legacy\)/.test(mapped.options.find((o) => o.value === v)?.label ?? "")) ?? mapped.values[0];
+    // game-data lists a spell only under a class it is mapped to, and some classes' lists omit homebrew
+    // (live 2026-10-13: the 2024 Cleric and Druid ids answered 9 and 24 spells, none of them homebrew), so
+    // ask each mapped class — base classes before subclass mappings — until one lists the spell.
+    const isSub = (v: string) => / - |\(Legacy\)/.test(mapped.options.find((o) => o.value === v)?.label ?? "");
+    const candidates = [...mapped.values.filter((v) => !isSub(v)), ...mapped.values.filter(isSub)];
     let def: any = null;
-    if (classId === undefined) mism.push("class-mapping: DDB reports no class on the spell");
+    if (!candidates.length) mism.push("class-mapping: DDB reports no class on the spell");
     else {
-      def = await readDefinition(spellId, classId);
-      if (!def) mism.push(`game-data/spells (classId ${classId}) does not list the spell yet`);
+      for (const classId of candidates) { def = await readDefinition(spellId, classId); if (def) break; }
+      if (!def) mism.push(`game-data/spells does not list the spell yet under any of its classes (${candidates.join(", ")})`);
       else mism.push(...verifyDefinition(def, f, asked));
     }
     return { value: def, mismatches: mism };

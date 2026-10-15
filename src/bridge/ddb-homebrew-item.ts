@@ -80,7 +80,8 @@ export interface HomebrewMagicItemFields {
 }
 
 const ARMOR_FIELDS = ["baseArmor", "dexterityModifier", "strengthRequirement", "stealthCheck"] as const;
-const EDIT_ONLY_KEYS = ["charges", "notes", "weight", "tags"] as const;
+// dexterityModifier: the CREATE POST nulls it for every base armor (live 2026-10-13); the edit POST keeps it.
+const EDIT_ONLY_KEYS = ["charges", "notes", "weight", "tags", "dexterityModifier"] as const;
 const SUB_KEYS = ["modifiers", "conditions", "spells"] as const;
 type SubKind = (typeof SUB_KEYS)[number];
 
@@ -136,6 +137,11 @@ export function fillItemForm(form: ParsedForm, f: HomebrewMagicItemFields): Item
   }
   if (kind === "Item" && !controlById(form, "field-type").values[0]) {
     throw bad(`itemType is required for a plain Item ("Wondrous Item", "Rod", "Scroll", "Staff", "Wand", "Ring", "Potion"); for armor or a weapon set baseType.`);
+  }
+  // Live 2026-10-13: a Weapon without a base weapon is rejected by the builder ("You must select a
+  // weapon type"). Say so up front, with the remedy for weapons DDB doesn't have.
+  if (kind === "Weapon" && !controlById(form, "field-base-weapon").values[0]) {
+    throw bad(`a Weapon item needs baseWeapon — DDB rejects it otherwise. For a weapon DDB lacks, pick the closest stand-in (same dice/properties) and keep the real stats in the description.`);
   }
   // Description is a (hidden type, wysiwyg, markup) trio; the server reads the wysiwyg copy.
   // Not compared on read-back: the server may normalize HTML.
@@ -379,8 +385,8 @@ async function verifyOrThrow(
 export async function createHomebrewMagicItem(f: HomebrewMagicItemFields): Promise<HomebrewItemResult> {
   const s = rtSiteSession();
   // The create form lacks charges/notes/weight/tags (live: edit-only), so they're a follow-up save.
-  const { charges, notes, weight, tags, modifiers, conditions, spells, ...base } = f;
-  const editOnly: HomebrewMagicItemFields = { charges, notes, weight, tags };
+  const { charges, notes, weight, tags, dexterityModifier, modifiers, conditions, spells, ...base } = f;
+  const editOnly: HomebrewMagicItemFields = { charges, notes, weight, tags, dexterityModifier };
   const hasEditOnly = EDIT_ONLY_KEYS.some((k) => editOnly[k] !== undefined);
   const form = await loadForm(s, "/homebrew/creations/create-magic-item/create", /\/create-magic-item\/create$/);
   const { asked } = fillItemForm(form, base);

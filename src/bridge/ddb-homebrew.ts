@@ -43,6 +43,7 @@ export interface HomebrewSense { sense: string; note?: string }
 export interface HomebrewSkill { skill: string; value: number; additionalBonus?: number }
 export interface HomebrewLanguage { language: string; note?: string }
 export type AbilityKey = "str" | "dex" | "con" | "int" | "wis" | "cha";
+export type SaveKey = "STR" | "DEX" | "CON" | "INT" | "WIS" | "CHA";
 
 export interface HomebrewMonsterFields {
   name?: string;
@@ -61,6 +62,10 @@ export interface HomebrewMonsterFields {
   hitDice?: { count: number; die: number; modifier?: number };
   abilities?: Partial<Record<AbilityKey, number>>;
   savingThrows?: string[];       // proficiencies, by label: "DEX", "WIS"
+  // Extra save bonus ON TOP of ability modifier + proficiency (live 2026-10-13: the statblock renders
+  // mod + PB + bonus, and DDB adds the save proficiency by itself when a bonus is set — so each key
+  // must be in savingThrows). Edit-form-only controls; on update a provided object REPLACES all six.
+  saveBonuses?: Partial<Record<SaveKey, number>>;
   damageAdjustments?: string[];  // by label: "Fire - Resistance"
   conditionImmunities?: string[];
   habitats?: string[];
@@ -107,6 +112,16 @@ const DESCRIPTIONS = {
   lair: "lair",
 } as const;
 
+const SAVE_KEYS: SaveKey[] = ["STR", "DEX", "CON", "INT", "WIS", "CHA"];
+
+/** A save bonus implies the save proficiency in DDB, so asking for one without the other is a caller error. */
+export function assertSaveBonuses(f: HomebrewMonsterFields): void {
+  if (!f.saveBonuses || !f.savingThrows) return;
+  const prof = f.savingThrows.map((x) => x.toUpperCase());
+  const orphan = SAVE_KEYS.filter((k) => f.saveBonuses![k] !== undefined && !prof.includes(k));
+  if (orphan.length) throw new DdbWriteError(`ddb-homebrew: saveBonuses for ${orphan.join(", ")} need the same abilities in savingThrows (DDB adds the proficiency itself, so the rendered save would be mod + proficiency + bonus)`, 400, orphan);
+}
+
 function setDescription(form: ParsedForm, key: string, html: string): void {
   setControl(form, `field-${key}-description-type`, "1");
   setControl(form, `field-${key}-description-wysiwyg`, html);
@@ -150,6 +165,13 @@ export function fillMonsterForm(form: ParsedForm, f: HomebrewMonsterFields, fres
     set(ABILITY_IDS[k].field, v);
   }
   set("field-monster-saving-throw", f.savingThrows);
+  if (f.saveBonuses !== undefined) {
+    assertSaveBonuses(f);
+    for (const k of SAVE_KEYS) {
+      const field = `${ABILITY_IDS[k.toLowerCase() as AbilityKey].field}-save-bonus`;
+      set(field, f.saveBonuses[k] ?? "");   // unspecified abilities are blanked: the object replaces
+    }
+  }
   set("field-damage-adjustment", f.damageAdjustments);
   set("field-condition-immunity", f.conditionImmunities);
   set("field-monster-environments", f.habitats);
@@ -281,6 +303,13 @@ export function verifyLabels(raw: any, f: HomebrewMonsterFields): string[] {
     eq("hitDice.count", f.hitDice.count, raw.hitPointDice?.diceCount);
     eq("hitDice.die", f.hitDice.die, raw.hitPointDice?.diceValue);
   }
+  for (const k of SAVE_KEYS) {
+    const want = f.saveBonuses?.[k];
+    if (f.saveBonuses === undefined) break;
+    const statId = ABILITY_IDS[k.toLowerCase() as AbilityKey].statId;
+    const got = (raw.savingThrows ?? []).find((st: { statId: number }) => st.statId === statId)?.bonusModifier;
+    eq(`${k} save bonus`, want ?? 0, got ?? 0);
+  }
   for (const [k, v] of Object.entries(f.abilities ?? {}) as Array<[AbilityKey, number | undefined]>) {
     eq(k, v, (raw.stats ?? []).find((st: { statId: number }) => st.statId === ABILITY_IDS[k].statId)?.value);
   }
@@ -363,7 +392,9 @@ export async function createHomebrewMonster(f: HomebrewMonsterFields): Promise<H
   const form = await loadForm(s, "/homebrew/creations/create-monster/create", /\/create-monster\/create$/);
   // `treasure` crashes the CREATE handler (→ /error, live-verified with every option) but saves
   // fine through the edit form, so it is applied as a follow-up builder save.
-  const { treasure, ...base } = f;
+  // `saveBonuses` has no control on the create form at all (edit-only), so it rides the same follow-up.
+  assertSaveBonuses(f);
+  const { treasure, saveBonuses, ...base } = f;
   const asked = fillMonsterForm(form, base, true);
   const location = await submit(s, form, "create monster");
   const m = location.match(EDIT_LOCATION);
@@ -372,8 +403,8 @@ export async function createHomebrewMonster(f: HomebrewMonsterFields): Promise<H
   let editPath = `/homebrew/creations/monsters/${m[1]}/edit`;
   // The monster exists from here on; a later failure must name it so the caller can fix or delete it.
   try {
-    if (treasure !== undefined) {
-      const saved = await saveBuilder(s, id, editPath, { treasure });
+    if (treasure !== undefined || saveBonuses !== undefined) {
+      const saved = await saveBuilder(s, id, editPath, { treasure, saveBonuses });
       editPath = saved.editPath;
       for (const [k, v] of saved.asked) asked.set(k, v);
     }

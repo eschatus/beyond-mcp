@@ -30,7 +30,8 @@ const condition = z.object({
   hide: z.boolean().optional(),
 });
 const higherLevel = z.object({
-  level: z.number().int().min(1).max(9).describe("Slot level the entry applies from."),
+  level: z.number().int().min(1).max(20).describe("Depends on higherLevelScale. Spell Scale: the interval (1 = every slot level above the spell's own, 2 = every two levels). Character Level: the character level where the change occurs (5, 11, 17 for a cantrip), with ABSOLUTE dice (2d10 at 5). Spell Level: the slot level that triggers the effect."),
+  modifier: z.number().int().min(0).optional().describe("Index into `modifiers` (0-based, creation order) of the modifier this entry scales, e.g. the damage modifier — how DDB builds Fireball's +1d6. Omit for an entry that scales no modifier (extra targets, special text)."),
   effect: z.string().describe("Effect label: Additional Count, Additional Creatures, Additional Points, Additional Targets, Extended Area, Extended Duration, Extended Range, Special."),
   dice: dice.optional(),
   fixedValue: z.number().int().optional(),
@@ -68,7 +69,8 @@ const fields = {
     type: z.enum(["Cone", "Cube", "Cylinder", "Emanation", "Line", "Sphere", "Square", "Square Feet"]),
     size: z.number().int().min(0),
   }).nullable().optional().describe("null clears it. (Applied by a follow-up save on create.)"),
-  attack: z.object({ type: z.enum(["Melee", "Ranged"]) }).nullable().optional().describe("Ticks \"as part of weapon attack\" with this attack type; null unticks it."),
+  attack: z.object({ type: z.enum(["Melee", "Ranged"]) }).nullable().optional().describe("Ticks \"as part of weapon attack\" with the affected weapon's range type (Green Flame Blade style); null unticks it. For a spell that makes its own attack roll use spellAttack."),
+  spellAttack: z.object({ type: z.enum(["Melee", "Ranged"]) }).nullable().optional().describe("The spell requires a spell attack roll (melee or ranged); null clears it. Exclusive with attack. (Applied by a follow-up save on create.)"),
   save: z.object({
     ability: z.enum(["STR", "DEX", "CON", "INT", "WIS", "CHA"]),
     onMiss: z.string().optional(), onSuccess: z.string().optional(), onFail: z.string().optional(),
@@ -76,7 +78,7 @@ const fields = {
   tags: z.array(z.string()).optional().describe("Spell tag labels, e.g. \"Damage\", \"Healing\"."),
   modifiers: z.array(modifier).optional().describe("Spell modifiers. On update a provided list REPLACES all modifiers ([] clears them)."),
   conditions: z.array(condition).optional().describe("Spell conditions. On update a provided list REPLACES all conditions ([] clears them)."),
-  higherLevels: z.array(higherLevel).optional().describe("Higher-level entries (not linked to a modifier). On update a provided list REPLACES them ([] clears them)."),
+  higherLevels: z.array(higherLevel).optional().describe("Higher-level entries; each may scale one of the spell's modifiers. Needs higherLevelScale. On update a provided list REPLACES them ([] clears them)."),
 };
 
 // Update takes the same fields, all optional; a provided sub-entry list replaces that kind.
@@ -104,7 +106,7 @@ function summary(r: hb.HomebrewSpellWriteResult) {
 export function registerDdbHomebrewSpellTools(server: McpServer): void {
   server.tool(
     "ddb_create_homebrew_spell",
-    "Create a private homebrew spell on the D&D Beyond account (no builder UI). Choice fields take the builder's labels; an unknown label errors with the valid list. The description is HTML. Area of effect, attack, saving throw and tags are applied by a follow-up save, and modifiers, conditions and higher-level entries are added after the base spell. Every write is read back (edit form, each sub-entry's form, character-service) and verified; on any failure after the base create, the error names the new spell's id so it can be fixed (ddb_update_homebrew_spell) or removed (ddb_delete_homebrew_spell).",
+    "Create a private homebrew spell on the D&D Beyond account (no builder UI). Choice fields take the builder's labels; an unknown label errors with the valid list. The description is HTML. Area of effect, attack / spell attack, saving throw and tags are applied by a follow-up save, and modifiers, conditions and higher-level entries are added after the base spell. Every write is read back (edit form, each sub-entry's form, character-service) and verified; on any failure after the base create, the error names the new spell's id so it can be fixed (ddb_update_homebrew_spell) or removed (ddb_delete_homebrew_spell).",
     fields,
     async (f) => text(JSON.stringify(summary(await hb.createHomebrewSpell(f)))),
   );

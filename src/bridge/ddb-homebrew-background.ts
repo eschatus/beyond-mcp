@@ -8,7 +8,14 @@
 //   update   GET+POST /homebrew/creations/create-background/{id}-{slug}/edit  multipart → 302 (slug follows renames)
 //   locate   GET /homebrew/creations/edit?entityTypeId=1669830167&id={id}     302 → the current edit path (a stale slug 404s)
 //   pools    GET+POST /modifier/create/{id}-1669830167/{1 skills|2 tools|3 languages}   urlencoded → 302;
-//            ONE "Choose a X" pool row from a multi-select (field-spell-modifier-default-sub-types)
+//            ONE row per POST, from a multi-select (field-spell-modifier-default-sub-types). The builder's own
+//            text: "To specify a granted background proficiency, add the single proficiency below. To specify
+//            a list of possible proficiencies to choose from, add all of those proficiencies below." So a row
+//            holding ONE option is a FIXED grant (what official 2024 backgrounds hold: one proficiency modifier
+//            per granted skill/tool, live-checked on character data), and a row holding several is a pool.
+//            Not reachable here: the "Choose a Gaming Set" / "Choose a Language" generic subtypes official
+//            backgrounds use (the pool POST answers "Nonexistent entity #408"); a pool of the concrete options
+//            is the closest representation.
 //   feat     /backgrounds/{id}-{slug}/granted-feat/create   (field-name, field-feat multi)
 //   gear     /entity/starting-equipment-slot/create/{id}-1669830167   (field-name)
 //   traits   /backgrounds/{id}-{slug}/characteristic/create   (field-type, field-name)
@@ -57,9 +64,16 @@ export interface HomebrewBackgroundFields {
   tags?: string[];
   // Sub-entries. On update a provided value REPLACES that kind wholesale; omitted = untouched.
   // null removes it. Empty pools / feat lists are rejected: the server would store an empty row.
-  skills?: OptionPick[] | null;                // one "Choose a Skill" pool
+  // Proficiency rows come in two shapes per kind. `skills` / `tools` / `languages` is ONE "choose one of
+  // these" pool; `skillGrants` / `toolGrants` / `languageGrants` are FIXED grants, one row per entry (each
+  // listed proficiency is granted outright). A kind's rows are replaced wholesale when either field is
+  // given (pass both to keep both); null / [] removes that field's rows.
+  skills?: OptionPick[] | null;
   tools?: OptionPick[] | null;
   languages?: OptionPick[] | null;
+  skillGrants?: OptionPick[] | null;
+  toolGrants?: OptionPick[] | null;
+  languageGrants?: OptionPick[] | null;
   grantedFeat?: { name: string; feats: OptionPick[] } | null;
   equipment?: string[];                        // free-text slots; [] clears
   characteristics?: Array<{ type: CharacteristicType; text: string }>;   // [] clears
@@ -126,16 +140,14 @@ export function fillBackgroundForm(form: ParsedForm, f: HomebrewBackgroundFields
 }
 
 /**
- * Descriptions compare tolerantly: six single-line fields come back without their <p> wrapper
- * (live), and the server may re-space markup. Strip one outer <p>…</p> and collapse whitespace.
+ * Descriptions compare tolerantly: six single-line fields come back without their leading <p> /
+ * trailing </p> (live), and the server may re-space markup. Strip those two tags and collapse whitespace.
  */
 export function sameHtml(a: string, b: string): boolean {
-  const norm = (s: string) => {
-    let t = s.replace(/\s+/g, " ").trim();
-    const m = t.match(/^<p>((?:(?!<\/?p>)[\s\S])*)<\/p>$/i);
-    if (m) t = m[1].trim();
-    return t;
-  };
+  // The single-line fields strip a leading <p> and a trailing </p> independently, even when the value
+  // holds several blocks: live, "<p>A</p><p>B</p><ul>…</ul>" is stored as "A</p><p>B</p><ul>…</ul>".
+  // That renders the same, so the comparison models the rule instead of calling it a mismatch.
+  const norm = (s: string) => s.replace(/\s+/g, " ").trim().replace(/^<p>/i, "").replace(/<\/p>$/i, "").trim();
   return norm(a) === norm(b);
 }
 
@@ -224,7 +236,7 @@ const POOL_SELECT = "field-spell-modifier-default-sub-types";
 
 /** What a fill resolved to, for verification: option ids (not labels — tool/language labels repeat). */
 interface Resolved {
-  pools: Partial<Record<PoolKind, string[]>>;
+  pools: Partial<Record<PoolKind, string[][]>>;   // per kind: the option ids of each modifier row
   grantedFeat?: { name: string; feats: string[] } | null;
   equipment?: string[];
   characteristics?: Array<{ type: string; text: string }>;
@@ -237,6 +249,19 @@ function pick(form: ParsedForm, id: string, picks: OptionPick[], what: string): 
   return values;
 }
 
+const GRANTS_KEY = { skills: "skillGrants", tools: "toolGrants", languages: "languageGrants" } as const;
+
+/**
+ * The modifier rows a kind should hold: the "choose from" pool (one row), then one single-option row per
+ * fixed grant. undefined = the caller touched neither field, so that kind's rows are left alone.
+ */
+export function proficiencyRows(f: HomebrewBackgroundFields, kind: PoolKind): OptionPick[][] | undefined {
+  const pool = f[kind];
+  const grants = f[GRANTS_KEY[kind]];
+  if (pool === undefined && grants === undefined) return undefined;
+  return [...(pool ? [pool] : []), ...(grants ?? []).map((g) => [g])];
+}
+
 const poolPath = (id: number, kind: PoolKind) => `/modifier/create/${id}-${BACKGROUND_ENTITY_TYPE_ID}/${POOL_VARIANT[kind]}`;
 const grantedFeatPath = (editPath: string) => `/backgrounds/${slugOf(editPath)}/granted-feat/create`;
 const characteristicPath = (editPath: string) => `/backgrounds/${slugOf(editPath)}/characteristic/create`;
@@ -246,10 +271,16 @@ const equipmentPath = (id: number) => `/entity/starting-equipment-slot/create/${
 async function resolveSubs(s: SiteSession, id: number, editPath: string, f: HomebrewBackgroundFields): Promise<Resolved> {
   const r: Resolved = { pools: {} };
   for (const kind of ["skills", "tools", "languages"] as const) {
-    const picks = f[kind];
-    if (!picks) continue;
-    const form = await loadForm(s, poolPath(id, kind), /\/modifier\/create\//);
-    r.pools[kind] = pick(form, POOL_SELECT, picks, kind);
+    const rows = proficiencyRows(f, kind);
+    if (!rows) continue;
+    const resolved: string[][] = [];
+    for (const picks of rows) {
+      const form = await loadForm(s, poolPath(id, kind), /\/modifier\/create\//);
+      resolved.push(pick(form, POOL_SELECT, picks, kind));
+    }
+    const all = resolved.flat();
+    if (new Set(all).size !== all.length) throw new DdbWriteError(`ddb-homebrew background: ${kind} lists the same option twice across its pool and grants`, 400, all);
+    r.pools[kind] = resolved;
   }
   if (f.grantedFeat) {
     const form = await loadForm(s, grantedFeatPath(editPath), /granted-feat\/create$/);
@@ -271,11 +302,11 @@ async function resolveSubs(s: SiteSession, id: number, editPath: string, f: Home
 
 async function addSubs(s: SiteSession, id: number, editPath: string, f: HomebrewBackgroundFields): Promise<void> {
   for (const kind of ["skills", "tools", "languages"] as const) {
-    const picks = f[kind];
-    if (!picks) continue;
-    const form = await loadForm(s, poolPath(id, kind), /\/modifier\/create\//);
-    pick(form, POOL_SELECT, picks, kind);
-    await submit(s, form, `add ${kind} pool to background ${id}`);
+    for (const picks of proficiencyRows(f, kind) ?? []) {
+      const form = await loadForm(s, poolPath(id, kind), /\/modifier\/create\//);
+      pick(form, POOL_SELECT, picks, kind);
+      await submit(s, form, `add ${kind} ${picks.length === 1 ? "grant" : "pool"} to background ${id}`);
+    }
   }
   if (f.grantedFeat) {
     const form = await loadForm(s, grantedFeatPath(editPath), /granted-feat\/create$/);
@@ -300,7 +331,7 @@ async function addSubs(s: SiteSession, id: number, editPath: string, f: Homebrew
 async function removeSubs(s: SiteSession, id: number, editHtml: string, f: HomebrewBackgroundFields): Promise<void> {
   const sections = parseSections(editHtml);
   const kinds: Array<[SectionKey, boolean]> = [
-    ["skills", f.skills !== undefined], ["tools", f.tools !== undefined], ["languages", f.languages !== undefined],
+    ["skills", proficiencyRows(f, "skills") !== undefined], ["tools", proficiencyRows(f, "tools") !== undefined], ["languages", proficiencyRows(f, "languages") !== undefined],
     ["granted-feat", f.grantedFeat !== undefined], ["equipment", f.equipment !== undefined], ["characteristics", f.characteristics !== undefined],
   ];
   for (const [key, on] of kinds) {
@@ -335,16 +366,17 @@ async function readBack(s: SiteSession, editPath: string, asked: Asked, descript
   const pools = { skills: [], tools: [], languages: [] } as Record<PoolKind, string[]>;
   for (const kind of ["skills", "tools", "languages"] as const) {
     pools[kind] = sec[kind].rows.flatMap((r) => poolNames(r.label));
-    const ids = want.pools[kind];
-    if (f[kind] === undefined) continue;
+    const expected = want.pools[kind];
+    if (!expected) continue;
     const rows = sec[kind].rows;
-    const expectRows = f[kind] === null ? 0 : 1;
-    if (rows.length !== expectRows || (sec[kind].count ?? rows.length) !== expectRows) {
-      mismatches.push(`${kind}: asked ${expectRows} pool row(s), DDB lists ${rows.length} (header says ${sec[kind].count})`);
-    } else if (ids && rows[0]) {
-      const form = await sub(rows[0].editHref, /\/edit$/);
-      const got = form?.controls.find((c) => c.id === POOL_SELECT)?.values ?? [];
-      if (!same(ids, got)) mismatches.push(`${kind}: asked option ids ${JSON.stringify(ids)}, DDB's pool holds ${JSON.stringify(got)} ("${rows[0].label}")`);
+    if (rows.length !== expected.length || (sec[kind].count ?? rows.length) !== expected.length) {
+      mismatches.push(`${kind}: asked ${expected.length} row(s), DDB lists ${rows.length} (header says ${sec[kind].count})`);
+      continue;
+    }
+    const got: string[][] = [];
+    for (const row of rows) got.push((await sub(row.editHref, /\/edit$/))?.controls.find((c) => c.id === POOL_SELECT)?.values ?? []);
+    if (!same(expected.map((r) => [...r].sort()), got.map((r) => [...r].sort()))) {
+      mismatches.push(`${kind}: asked option ids ${JSON.stringify(expected)}, DDB's rows hold ${JSON.stringify(got)} (${rows.map((r) => `"${r.label}"`).join(", ")})`);
     }
   }
   if (f.equipment !== undefined) {

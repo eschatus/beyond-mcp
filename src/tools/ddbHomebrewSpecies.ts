@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import * as hb from "../bridge/ddb-homebrew-species.js";
 import { text, optionChoice } from "./helpers.js";
+import { limitedUseSchema, entitySpellSchema } from "./homebrewEntitySchemas.js";
 
 // D&D Beyond homebrew SPECIES tools — create / update / delete without the site's builder UX.
 // Registered only when DDB_WRITES=enabled (alongside the sheet writes). Primitives: they do
@@ -24,6 +25,14 @@ const modifier = z.object({
   duration: z.object({ interval: z.number().int().min(1), unit: z.enum(["Round", "Minute", "Hour", "Day"]) }).optional(),
 });
 
+const traitOption = z.object({
+  name: z.string().min(2).max(256),
+  snippet: z.string().min(2).describe("One-line summary shown in the character builder. Required."),
+  description: html("The choice's text").describe("The choice's full text as HTML. Required."),
+  requiredLevel: z.number().int().min(1).max(20).optional().describe("Character level at which the choice becomes available."),
+  isGranted: z.boolean().optional().describe("The character always gets this choice instead of picking it."),
+});
+
 const trait = z.object({
   name: z.string().min(2).max(256),
   snippet: z.string().min(2).describe("One-line summary shown in the character builder. Required."),
@@ -36,6 +45,9 @@ const trait = z.object({
   hideOnDetailsPage: z.boolean().optional(),
   isCalledOut: z.boolean().optional().describe("Call out the trait's modifiers in the character builder."),
   modifiers: z.array(modifier).optional().describe("Mechanical effects of the trait (senses, resistances, proficiencies, …)."),
+  actions: z.array(limitedUseSchema).optional().describe("Limited-use / granted actions on the trait (\"Add Action\"): uses per rest, activation, reset."),
+  spells: z.array(entitySpellSchema).optional().describe("Spell grants on the trait (\"Add Spell\"): always prepared, free casts per reset."),
+  traitOptions: z.array(traitOption).optional().describe("Choices inside the trait, picked in the character builder (e.g. Heavy Plating / Light Plating)."),
 });
 
 const option = z.object({
@@ -44,6 +56,7 @@ const option = z.object({
   description: html("The option's description"),
   speciesGroup: optionChoice.optional().describe("Race-group label, e.g. \"Aasimar\". Some labels repeat (\"-\"): pass { value } (the error lists the ids)."),
   isVariant: z.boolean().optional(),
+  traits: z.array(trait).optional().describe("The option's own traits (e.g. a strain's abilities); same shape as a species trait. Needs the parent species' supportsOptions."),
 });
 
 const speed = z.number().int().min(1).max(500).nullable().optional();

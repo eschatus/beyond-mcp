@@ -53,6 +53,79 @@ least 2 characters), the module comment is the newer source.
 | Species | `game-data/races` | basics, speeds, size; traits lag. A species with options is listed only through its options. |
 | Magic item, background, subclass | none for private drafts | use the edit page |
 
+## Findings from a full-sourcebook import (2026-10-13)
+
+A real sourcebook was pushed through every tool: 15 backgrounds, 4 species, 17 subclasses, 15 feats,
+12 spells, 74 items and 27 statblocks. That import surfaced and verified these facts live. The module
+headers hold the detail.
+
+**Shared sub-forms** (`ddb-homebrew-entity.ts`): limited-use actions and entity spells work on any owner.
+- Owner type ids:
+
+  | Owner | Id |
+  | --- | --- |
+  | Feat | 1088085227 |
+  | Feat option | 400581042 |
+  | Racial trait (including a species option's traits) | 1960452172 |
+  | Class feature | 12168134 |
+  | Class-feature option | 258900837 |
+  | Species trait option | 306912077 (linked, not yet exercised) |
+
+- **Uses:** the limited-use form has no uses control. Uses are separate rows,
+  `/entity/limited-use/{id}/level-scale/create`, built as `(count op ability mod) op PB`, and each row can be
+  per level. Uses need a reset, and there is no "minimum of 1".
+- **Resets:** "Short or Long Rest" maps to Short Rest. Custom triggers map to Other, with the timing kept in
+  the text.
+- **Feat spell form:** it lacks always-prepared, charges, save DC and restriction.
+- **Ability score on actions:** feat and trait owners need an ability score for an action with an attack
+  range or save; class features don't.
+
+**Backgrounds**
+- A proficiency pool with ONE option is a fixed grant; with several options it is a choice. The tool fields
+  are `skillGrants`, `toolGrants` and `languageGrants`.
+- The 2024 "Ability Scores" hidden feats and "Choose a Gaming Set" (#408) can't be selected in homebrew.
+- Single-line description fields strip a leading `<p>` and a trailing `</p>` independently.
+
+**Spells**
+- `field-attack-type` is the *spell* attack roll control when "as part of weapon attack" is unticked
+  (`spellAttack`).
+- Higher-level entries link to a modifier (`higherLevels[].modifier`), as official Fireball is built.
+  How their level field works depends on the scale type:
+
+  | Scale type | Level field means | Dice |
+  | --- | --- | --- |
+  | Spell Scale | every N slots | added |
+  | Character Level | the character level | absolute |
+  | Spell Level | the trigger slot | added |
+
+  Entries stay hidden until higher-level casting is enabled.
+- The 2024 Cleric and Druid game-data lists omit homebrew, so read-back tries each mapped class.
+
+**Items**
+- "+N" weapons use Bonus / Magic (subtype 312), the same as the official Weapon +1/+2/+3.
+- A Weapon item can't be created without a base weapon. Mundane book weapons use PHB stand-ins.
+- Armor `dexterity-modifier` is nulled on create but kept on edit, so it is applied in the follow-up save.
+- Charge resets: Short Rest, Long Rest, Dawn, Other, None/Consumable.
+
+**Monsters**
+- `field-*-save-bonus` adds on top of proficiency and forces proficiency on, so it is only valid for
+  proficient saves (`saveBonuses`).
+- `languagesNote` is appended after the languages list; it does not replace it.
+
+**Species**
+- Option-level traits use the same trait form, at `/entity/species-trait/create/{optId}-1228963568`.
+- Trait options exist.
+- There is no creature-type control, no Advantage-vs-Poisoned subtype (use Advantage / Saving Throws with a
+  restriction), no conditional Expertise, and no understand-only language.
+
+**Subclasses**
+- Options carry required level, dependent-option chains (resolve to ids created in the same call; labels
+  repeat on update), and their own modifiers, spells and actions.
+- A feature with many options can take longer than a 60 s MCP client request timeout, because it makes
+  dozens of sequential requests.
+
+**Read lag:** game-data took over 30 s to list some new feats, so `settle()` now waits about 60 s in all.
+
 ## Entity type ids
 
 | Type | Id |

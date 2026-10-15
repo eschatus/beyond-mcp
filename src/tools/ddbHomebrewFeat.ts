@@ -2,13 +2,14 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import * as hb from "../bridge/ddb-homebrew-feat.js";
 import { text } from "./helpers.js";
+import { limitedUseSchema, entitySpellSchema } from "./homebrewEntitySchemas.js";
 
 // D&D Beyond homebrew FEAT tools — create / update / delete without the site's builder UI.
 // Registered only when DDB_WRITES=enabled (alongside the other writes). Primitives: they do
 // exactly what is asked on the caller's account; the caller owns intent. Choice fields take the
 // builder's own LABELS; an unknown label fails with the list of valid ones. Every write is read
 // back (edit form, game-data/feats, edit-page listings) and verified — a mismatch is an error
-// naming the feat, never silently accepted. Out of scope for now: feat options, spells, actions.
+// naming the feat, never silently accepted. Options (with their own actions), limited-use actions and spell grants use the shared sub-forms.
 
 const requirement = z.object({
   type: z.string().describe("Prerequisite type label: \"Ability Score\", \"Class\", \"Class Feature\", \"Custom Value\", \"Feat\", \"Level\", \"Proficiency\", \"Size\", \"Species\", \"Species Option\"."),
@@ -33,6 +34,13 @@ const modifier = z.object({
   duration: z.object({ interval: z.number().int().min(1), unit: z.enum(["Round", "Minute", "Hour", "Day"]) }).optional(),
 });
 
+const option = z.object({
+  name: z.string().min(1).describe("Option name, e.g. \"Steady Aim\"."),
+  description: z.string().optional().describe("HTML."),
+  snippet: z.string().optional(),
+  actions: z.array(limitedUseSchema).optional().describe("The option's own limited-use actions (the option page has its own \"Add Action\")."),
+});
+
 const fields = {
   name: z.string().min(3).max(1024),
   version: z.string().max(100).optional().describe("Free-text version label shown with the creation."),
@@ -41,6 +49,9 @@ const fields = {
   tags: z.array(z.string()).optional().describe("Feat tag labels. The list holds case-variant duplicates (\"General\" and \"genral\" are different tags); the exact label is matched first."),
   prerequisites: z.array(prerequisite).optional(),
   modifiers: z.array(modifier).optional().describe("Mechanical effects, e.g. [{type:\"Bonus\", subType:\"Strength Score\", fixedValue:1}] for +1 STR."),
+  options: z.array(option).optional().describe("Choices offered by the feat (the builder's \"Add an Option\")."),
+  actions: z.array(limitedUseSchema).optional().describe("Limited-use / granted actions of the feat itself. Uses need a reset."),
+  spells: z.array(entitySpellSchema).optional().describe("Spell grants. The feat form has no always-prepared / at-level / charges / save DC / restriction controls: asking for one errors."),
 };
 
 const updateFields = Object.fromEntries(Object.entries(fields).map(([k, v]) => [k, v.optional()])) as {
@@ -63,14 +74,14 @@ function summary(r: hb.HomebrewFeatResult) {
 export function registerDdbHomebrewFeatTools(server: McpServer): void {
   server.tool(
     "ddb_create_homebrew_feat",
-    "Create a private homebrew feat on the D&D Beyond account (no builder UI). Choice fields take the builder's labels; an unknown label errors with the valid list. The description is HTML. Prerequisites (text plus optional machine-checked requirements) and modifiers are added after the base feat. The result is read back and verified; on any failure after the base create, the error names the new feat's id so it can be fixed (ddb_update_homebrew_feat) or removed (ddb_delete_homebrew_feat). Options, spells and actions are not supported yet.",
+    "Create a private homebrew feat on the D&D Beyond account (no builder UI). Choice fields take the builder's labels; an unknown label errors with the valid list. The description is HTML. Prerequisites (text plus optional machine-checked requirements) and modifiers are added after the base feat. The result is read back and verified; on any failure after the base create, the error names the new feat's id so it can be fixed (ddb_update_homebrew_feat) or removed (ddb_delete_homebrew_feat). Options, actions and spell grants are added too (each verified).",
     fields,
     async (f) => text(JSON.stringify(summary(await hb.createHomebrewFeat(f)))),
   );
 
   server.tool(
     "ddb_update_homebrew_feat",
-    "Update one of the account's homebrew feats by id. Only the fields given change; everything else keeps its current value. A provided prerequisites/modifiers list REPLACES that kind entirely ([] clears it). Read back and verified like create. Existing options, spells and actions are left untouched.",
+    "Update one of the account's homebrew feats by id. Only the fields given change; everything else keeps its current value. A provided prerequisites/modifiers/options/actions/spells list REPLACES that kind entirely ([] clears it). Read back and verified like create. Kinds not provided are left untouched.",
     { featId: z.number().int().positive(), ...updateFields },
     async ({ featId, ...f }) => text(JSON.stringify(summary(await hb.updateHomebrewFeat(featId, f)))),
   );

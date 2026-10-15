@@ -11,6 +11,11 @@
 //   update   GET+POST /homebrew/creations/species/{id}-{slug}/edit              multipart → 302 (slug follows renames)
 //   trait    GET+POST /entity/species-trait/create/{id}-1743923279              urlencoded → 302 /entity/species-trait/{tid}/edit
 //   trait-modifier  GET+POST /modifier/create/{tid}-1960452172/0                the generic modifier editor
+//   option-trait    GET+POST /entity/species-trait/create/{oid}-1228963568      same form as a species trait; the new trait
+//                                                                               is itself a racial-trait mapping (owner type
+//                                                                               1960452172 for its sub-forms), listed on the option's edit page
+//   trait-option    GET+POST /entity/species-trait/{tid}/species-trait-option/create   urlencoded → 302 …/species-trait-option/{toid}/edit
+//   trait-action / trait-spell  /entity/limited-use|spell/create/{tid}-1960452172      via ddb-homebrew-entity.ts
 //   option   GET+POST /homebrew/creations/species/{id}-{slug}/create-species-options/create
 //                                                                               multipart → 302 …/species-options/{oid}-{slug}/edit
 //   delete   POST /entity/species-trait/{tid}/delete                            (ajax-post)
@@ -28,6 +33,10 @@ import { parse } from "node-html-parser";
 import { rtSiteSession, rtRawFetch, type SiteSession } from "./ddb-rt.js";
 import { parseForm, setControl, controlById, type ParsedForm, type OptionValue } from "./html-form.js";
 import { DdbWriteError } from "./ddb-write.js";
+import {
+  validateLimitedUse, validateEntitySpell, addLimitedUse, verifyLimitedUse, addEntitySpell, verifyEntitySpell, listLimitedUses, listEntitySpells,
+  type HomebrewLimitedUse, type HomebrewEntitySpell, type AddedLimitedUse, type AddedEntitySpell,
+} from "./ddb-homebrew-entity.js";
 import {
   getPage, loadForm, resolveEditPath, submit, ajaxPost, verifyEditForm, deleteCreation, settle, SETTLE_DELAYS_MS,
   embeddedSubTypes, fillModifierForm, type Asked, type HomebrewModifier,
@@ -50,6 +59,16 @@ const RACES_URL = "https://character-service.dndbeyond.com/character/v5/game-dat
 export type SpeciesFeatureType = "Granted" | "Additional" | "Replacement";
 export type SpeedKey = "walk" | "burrow" | "climb" | "fly" | "swim";
 
+/** A choice offered inside a trait ("Heavy Plating" / "Light Plating"), picked in the character builder. */
+export interface HomebrewTraitOption {
+  name: string;
+  snippet: string;
+  description: string;                 // HTML
+  /** Character level at which the choice becomes available (1-20). */
+  requiredLevel?: number;
+  isGranted?: boolean;
+}
+
 export interface HomebrewSpeciesTrait {
   name: string;
   snippet: string;
@@ -62,6 +81,12 @@ export interface HomebrewSpeciesTrait {
   hideOnDetailsPage?: boolean;
   isCalledOut?: boolean;
   modifiers?: HomebrewModifier[];
+  /** Limited-use / granted actions ("Add Action"): uses per rest, activation, etc. */
+  actions?: HomebrewLimitedUse[];
+  /** Spell grants ("Add Spell"). */
+  spells?: HomebrewEntitySpell[];
+  /** Choices inside the trait. */
+  traitOptions?: HomebrewTraitOption[];
 }
 
 export interface HomebrewSpeciesOption {
@@ -70,6 +95,8 @@ export interface HomebrewSpeciesOption {
   description: string;                 // HTML
   speciesGroup?: string | OptionValue;
   isVariant?: boolean;
+  /** The option's own traits (e.g. a variant's own abilities). */
+  traits?: HomebrewSpeciesTrait[];
 }
 
 export interface HomebrewSpeciesFields {
@@ -157,6 +184,33 @@ export function validateTrait(t: HomebrewSpeciesTrait, i: number): void {
   if (!["Granted", "Additional", "Replacement"].includes(t.featureType)) bad(`featureType must be Granted, Additional or Replacement (got ${JSON.stringify(t.featureType)})`);
   if (t.requiredLevel !== undefined && (!Number.isInteger(t.requiredLevel) || t.requiredLevel < 1 || t.requiredLevel > 20)) bad("requiredLevel must be an integer 1-20");
   if (t.displayOrder !== undefined && !Number.isInteger(t.displayOrder)) bad("displayOrder must be an integer");
+  (t.traitOptions ?? []).forEach((o, j) => {
+    const ob = (m: string) => bad(`trait option #${j + 1} ("${o.name}"): ${m}`);
+    if (typeof o.name !== "string" || o.name.trim().length < 2) ob("name must be at least 2 characters");
+    if (!o.snippet || o.snippet.trim().length < 2) ob("snippet must be at least 2 characters");
+    if (!o.description?.trim()) ob("description is required");
+    if (o.requiredLevel !== undefined && (!Number.isInteger(o.requiredLevel) || o.requiredLevel < 1 || o.requiredLevel > 20)) ob("requiredLevel must be an integer 1-20");
+  });
+  for (const a of t.actions ?? []) validateLimitedUse(a);
+  for (const sp of t.spells ?? []) validateEntitySpell(sp);
+}
+
+/** Validate an option and its own traits before anything is posted. */
+export function validateOption(o: HomebrewSpeciesOption, i: number): void {
+  if (typeof o.name !== "string" || o.name.trim().length < 2) throw new DdbWriteError(`ddb-homebrew species option #${i + 1}: name must be at least 2 characters`, 400, null);
+  (o.traits ?? []).forEach((t, j) => validateTrait(t, j));
+}
+
+/** Fill a species-trait-option CREATE form (a choice inside a trait). */
+export function fillTraitOptionForm(form: ParsedForm, o: HomebrewTraitOption): Asked {
+  const asked: Asked = new Map();
+  const set = (id: string, v: string | number | boolean) => { setControl(form, id, v); asked.set(id, [...controlById(form, id).values]); };
+  set("field-name", o.name);
+  set("field-snippet", o.snippet);
+  setDescription(form, "class-feature-option-description", o.description);
+  if (o.requiredLevel !== undefined) set("field-required-level", o.requiredLevel);
+  set("field-is-granted", o.isGranted ?? false);
+  return asked;
 }
 
 /** Fill a species-trait CREATE form. Returns what a re-read of the trait's edit form must show. */
@@ -228,20 +282,43 @@ export function parseModifierListing(html: string): ListedModifier[] {
   return out;
 }
 
+export interface ListedTraitOption { id: number; name: string; granted: string }
+
+/** The option listing on a trait's edit page (`species-trait-option/{id}/edit` rows: name, required level, granted). */
+export function parseTraitOptionListing(html: string): ListedTraitOption[] {
+  const out: ListedTraitOption[] = [];
+  for (const tr of parse(html).querySelectorAll("tr")) {
+    const id = tr.toString().match(/href="\/entity\/species-trait\/\d+\/species-trait-option\/(\d+)\/edit"/);
+    if (!id) continue;
+    const td = tr.querySelectorAll("td").map(cellText);
+    out.push({ id: Number(id[1]), name: td[0] ?? "", granted: td[2] ?? "" });
+  }
+  return out;
+}
+
 const SPECIES_EDIT_LOCATION = /\/homebrew\/creations\/species\/((\d+)-[^/?#]+)\/edit/;
 const TRAIT_EDIT_LOCATION = /\/entity\/species-trait\/(\d+)\/edit/;
 const OPTION_EDIT_LOCATION = /\/homebrew\/creations\/species-options\/(\d+)-[^/?#]+\/edit/;
 
 // --- adding sub-entries ---
 
-interface CreatedTrait { id: number; trait: HomebrewSpeciesTrait; asked: Asked; modifiers: Array<{ label: string; fixedValue?: number }> }
-interface CreatedOption { id: number; option: HomebrewSpeciesOption; asked: Asked; editPath: string }
+interface CreatedTraitOption { id: number; option: HomebrewTraitOption; asked: Asked }
+interface CreatedTrait {
+  id: number; trait: HomebrewSpeciesTrait; asked: Asked; modifiers: Array<{ label: string; fixedValue?: number }>;
+  traitOptions: CreatedTraitOption[]; actions: AddedLimitedUse[]; spells: AddedEntitySpell[];
+}
+interface CreatedOption { id: number; option: HomebrewSpeciesOption; asked: Asked; editPath: string; traits: CreatedTrait[] }
 
-async function addTrait(s: SiteSession, speciesId: number, t: HomebrewSpeciesTrait): Promise<CreatedTrait> {
-  const form = await loadForm(s, `/entity/species-trait/create/${speciesId}-${SPECIES_ENTITY_TYPE_ID}`, /species-trait\/create\//);
+/**
+ * Add a trait to a species (ownerTypeId = SPECIES_ENTITY_TYPE_ID) or to a species option
+ * (SPECIES_OPTION_ENTITY_TYPE_ID). Either way the new trait is a racial-trait mapping, so its own
+ * modifiers / actions / spells / choices all use owner type 1960452172 (live-verified on an option trait).
+ */
+async function addTrait(s: SiteSession, ownerId: number, ownerTypeId: number, t: HomebrewSpeciesTrait): Promise<CreatedTrait> {
+  const form = await loadForm(s, `/entity/species-trait/create/${ownerId}-${ownerTypeId}`, /species-trait\/create\//);
   const asked = fillTraitForm(form, t);
   let location: string;
-  try { location = await submit(s, form, `add trait "${t.name}" to species ${speciesId}`); }
+  try { location = await submit(s, form, `add trait "${t.name}" to ${ownerTypeId === SPECIES_ENTITY_TYPE_ID ? "species" : "species option"} ${ownerId}`); }
   catch (err) {
     if (err instanceof DdbWriteError && err.status === 200) {
       throw new DdbWriteError(`${err.message} (a trait POST DDB rejects is a silent 200 with no field errors — check name, snippet, description and feature type)`, 200, null);
@@ -249,20 +326,35 @@ async function addTrait(s: SiteSession, speciesId: number, t: HomebrewSpeciesTra
     throw err;
   }
   const tid = location.match(TRAIT_EDIT_LOCATION)?.[1];
-  if (!tid) throw new DdbWriteError(`ddb-homebrew add trait "${t.name}" to species ${speciesId}: unexpected redirect ${location}`, 302, location);
+  if (!tid) throw new DdbWriteError(`ddb-homebrew add trait "${t.name}" to owner ${ownerId}: unexpected redirect ${location}`, 302, location);
   const id = Number(tid);
-  const modifiers: CreatedTrait["modifiers"] = [];
-  for (const m of t.modifiers ?? []) {
-    const path = `/modifier/create/${id}-${RACIAL_TRAIT_ENTITY_TYPE_ID}/0`;
-    const html = await getPage(s, path);
-    const mform = parseForm(html, /modifier\/create\//);
-    const { typeId, subTypeId } = fillModifierForm(mform, html, m);
-    const typeLabel = controlById(mform, "field-spell-modifier-type").options.find((o) => o.value === String(typeId))?.label ?? "";
-    const subName = embeddedSubTypes(html).find((x) => x.id === subTypeId && x.type === typeId)?.name ?? "";
-    await submit(s, mform, `add ${typeLabel} modifier to trait ${id} ("${t.name}")`);
-    modifiers.push({ label: `${typeLabel} - ${subName}`, fixedValue: m.fixedValue });
+  const out: CreatedTrait = { id, trait: t, asked, modifiers: [], traitOptions: [], actions: [], spells: [] };
+  try {
+    for (const m of t.modifiers ?? []) {
+      const path = `/modifier/create/${id}-${RACIAL_TRAIT_ENTITY_TYPE_ID}/0`;
+      const html = await getPage(s, path);
+      const mform = parseForm(html, /modifier\/create\//);
+      const { typeId, subTypeId } = fillModifierForm(mform, html, m);
+      const typeLabel = controlById(mform, "field-spell-modifier-type").options.find((o) => o.value === String(typeId))?.label ?? "";
+      const subName = embeddedSubTypes(html).find((x) => x.id === subTypeId && x.type === typeId)?.name ?? "";
+      await submit(s, mform, `add ${typeLabel} modifier to trait ${id} ("${t.name}")`);
+      out.modifiers.push({ label: `${typeLabel} - ${subName}`, fixedValue: m.fixedValue });
+    }
+    for (const o of t.traitOptions ?? []) {
+      const oform = await loadForm(s, `/entity/species-trait/${id}/species-trait-option/create`, /species-trait-option\/create$/);
+      const oasked = fillTraitOptionForm(oform, o);
+      const loc = await submit(s, oform, `add option "${o.name}" to trait ${id} ("${t.name}")`);
+      const oid = loc.match(/species-trait-option\/(\d+)\/edit/)?.[1];
+      if (!oid) throw new DdbWriteError(`ddb-homebrew add trait option "${o.name}": unexpected redirect ${loc}`, 302, loc);
+      out.traitOptions.push({ id: Number(oid), option: o, asked: oasked });
+    }
+    for (const a of t.actions ?? []) out.actions.push(await addLimitedUse(s, id, RACIAL_TRAIT_ENTITY_TYPE_ID, a));
+    for (const sp of t.spells ?? []) out.spells.push(await addEntitySpell(s, id, RACIAL_TRAIT_ENTITY_TYPE_ID, sp));
+  } catch (err) {
+    const e = err instanceof DdbWriteError ? err : null;
+    throw new DdbWriteError(`ddb-homebrew: trait ${id} ("${t.name}") was created, then: ${(err as Error).message}`, e?.status ?? 500, e?.detail ?? null);
   }
-  return { id, trait: t, asked, modifiers };
+  return out;
 }
 
 async function addOption(s: SiteSession, speciesEditPath: string, o: HomebrewSpeciesOption): Promise<CreatedOption> {
@@ -272,7 +364,14 @@ async function addOption(s: SiteSession, speciesEditPath: string, o: HomebrewSpe
   const location = await submit(s, form, `add option "${o.name}"`);
   const m = location.match(OPTION_EDIT_LOCATION);
   if (!m) throw new DdbWriteError(`ddb-homebrew add species option "${o.name}": unexpected redirect ${location}`, 302, location);
-  return { id: Number(m[1]), option: o, asked, editPath: m[0] };
+  const id = Number(m[1]);
+  const traits: CreatedTrait[] = [];
+  try { for (const t of o.traits ?? []) traits.push(await addTrait(s, id, SPECIES_OPTION_ENTITY_TYPE_ID, t)); }
+  catch (err) {
+    const e = err instanceof DdbWriteError ? err : null;
+    throw new DdbWriteError(`ddb-homebrew: species option ${id} ("${o.name}") was created, then: ${(err as Error).message}`, e?.status ?? 500, e?.detail ?? null);
+  }
+  return { id, option: o, asked, editPath: m[0], traits };
 }
 
 // --- read-back verification ---
@@ -327,6 +426,57 @@ export interface SpeciesExpectations {
 
 interface SpeciesRead { page: ReturnType<typeof parseSpeciesPage>; race: RaceJson | undefined }
 
+const idsOf = (xs: Array<{ id: number }>) => xs.map((x) => x.id).sort((a, b) => a - b);
+const sameIds = (want: Array<{ id: number }>, got: Array<{ id: number }>) => JSON.stringify(idsOf(want)) === JSON.stringify(idsOf(got));
+
+/**
+ * Check created traits against the owner's trait listing, each trait's own edit form, its modifier
+ * listing, its choices (trait options) and the ids of its actions / spell grants. `who` prefixes
+ * messages for traits under an option. The actions' and spells' own forms are verified separately
+ * (verifyDeep), once, after this settles.
+ */
+async function checkTraits(s: SiteSession, who: string, listed: ListedTrait[], created: CreatedTrait[], out: string[]): Promise<void> {
+  if (!sameIds(created, listed)) out.push(`${who}traits: asked ids [${idsOf(created).join(", ")}], the owner lists [${idsOf(listed).join(", ")}]`);
+  for (const t of created) {
+    const row = listed.find((r) => r.id === t.id);
+    if (row && (row.name !== t.trait.name.trim() || row.featureType !== t.trait.featureType)) {
+      out.push(`${who}trait ${t.id}: asked "${t.trait.name}" (${t.trait.featureType}), the owner lists "${row.name}" (${row.featureType})`);
+    }
+    const thtml = await getPage(s, `/entity/species-trait/${t.id}/edit`);
+    for (const m of verifyEditForm(t.asked, parseForm(thtml, /species-trait\/\d+\/edit$/))) out.push(`${who}trait ${t.id} ("${t.trait.name}") ${m}`);
+    const mods = parseModifierListing(thtml);
+    const wantMods = t.modifiers.map((m) => m.label);
+    if (JSON.stringify(lc(wantMods)) !== JSON.stringify(lc(mods.map((m) => m.label)))) {
+      out.push(`${who}trait ${t.id} ("${t.trait.name}") modifiers: asked [${wantMods.join(", ")}], DDB lists [${mods.map((m) => m.label).join(", ")}]`);
+    } else {
+      // Same label multiset: also compare fixed values where the caller gave one (matched label by label).
+      const pool = [...mods];
+      for (const m of t.modifiers) {
+        const i = pool.findIndex((p) => p.label.toLowerCase() === m.label.toLowerCase() && (m.fixedValue === undefined || p.fixedValue === String(m.fixedValue)));
+        if (i < 0 && m.fixedValue !== undefined) out.push(`${who}trait ${t.id} ("${t.trait.name}") modifier ${m.label}: asked fixed value ${m.fixedValue}, DDB lists ${pool.filter((p) => p.label.toLowerCase() === m.label.toLowerCase()).map((p) => JSON.stringify(p.fixedValue)).join("/")}`);
+        else if (i >= 0) pool.splice(i, 1);
+      }
+    }
+    const opts = parseTraitOptionListing(thtml);
+    if (!sameIds(t.traitOptions, opts)) out.push(`${who}trait ${t.id} ("${t.trait.name}") choices: asked ids [${idsOf(t.traitOptions).join(", ")}], DDB lists [${idsOf(opts).join(", ")}]`);
+    for (const o of t.traitOptions) {
+      const row2 = opts.find((r) => r.id === o.id);
+      if (row2 && row2.name !== o.option.name.trim()) out.push(`${who}trait ${t.id} choice ${o.id}: asked "${o.option.name}", DDB lists "${row2.name}"`);
+      const oform = parseForm(await getPage(s, `/entity/species-trait/${t.id}/species-trait-option/${o.id}/edit`), /\/edit$/);
+      for (const m of verifyEditForm(o.asked, oform)) out.push(`${who}trait ${t.id} choice ${o.id} ("${o.option.name}") ${m}`);
+    }
+    const acts = listLimitedUses(thtml);
+    if (!sameIds(t.actions, acts)) out.push(`${who}trait ${t.id} ("${t.trait.name}") actions: asked ids [${idsOf(t.actions).join(", ")}], DDB lists [${idsOf(acts).join(", ")}]`);
+    const sps = listEntitySpells(thtml);
+    if (!sameIds(t.spells, sps)) out.push(`${who}trait ${t.id} ("${t.trait.name}") spell grants: asked ids [${idsOf(t.spells).join(", ")}], DDB lists [${idsOf(sps).join(", ")}]`);
+  }
+}
+
+/** Every created trait, species-level and under options. */
+function allTraits(exp: SpeciesExpectations): CreatedTrait[] {
+  return [...(exp.traits ?? []), ...(exp.options ?? []).flatMap((o) => o.traits)];
+}
+
 async function verifyOrThrow(s: SiteSession, id: number, editPath: string, exp: SpeciesExpectations): Promise<SpeciesRead> {
   const { value, mismatches } = await settle<SpeciesRead>(async () => {
     const out: string[] = [];
@@ -335,40 +485,17 @@ async function verifyOrThrow(s: SiteSession, id: number, editPath: string, exp: 
     out.push(...verifyEditForm(exp.asked, edit));
     const page = parseSpeciesPage(html);
 
-    if (exp.traits) {
-      const want = exp.traits.map((t) => t.id).sort((a, b) => a - b);
-      const got = page.traits.map((t) => t.id).sort((a, b) => a - b);
-      if (JSON.stringify(want) !== JSON.stringify(got)) out.push(`traits: asked ids [${want.join(", ")}], the species lists [${got.join(", ")}]`);
-      for (const t of exp.traits) {
-        const row = page.traits.find((r) => r.id === t.id);
-        if (row && (row.name !== t.trait.name.trim() || row.featureType !== t.trait.featureType)) {
-          out.push(`trait ${t.id}: asked "${t.trait.name}" (${t.trait.featureType}), the species lists "${row.name}" (${row.featureType})`);
-        }
-        const tpath = `/entity/species-trait/${t.id}/edit`;
-        const thtml = await getPage(s, tpath);
-        for (const m of verifyEditForm(t.asked, parseForm(thtml, /species-trait\/\d+\/edit$/))) out.push(`trait ${t.id} ("${t.trait.name}") ${m}`);
-        const listed = parseModifierListing(thtml);
-        const wantMods = t.modifiers.map((m) => m.label);
-        if (JSON.stringify(lc(wantMods)) !== JSON.stringify(lc(listed.map((m) => m.label)))) {
-          out.push(`trait ${t.id} ("${t.trait.name}") modifiers: asked [${wantMods.join(", ")}], DDB lists [${listed.map((m) => m.label).join(", ")}]`);
-        } else {
-          // Same label multiset: also compare fixed values where the caller gave one (matched label by label).
-          const pool = [...listed];
-          for (const m of t.modifiers) {
-            const i = pool.findIndex((p) => p.label.toLowerCase() === m.label.toLowerCase() && (m.fixedValue === undefined || p.fixedValue === String(m.fixedValue)));
-            if (i < 0 && m.fixedValue !== undefined) out.push(`trait ${t.id} ("${t.trait.name}") modifier ${m.label}: asked fixed value ${m.fixedValue}, DDB lists ${pool.filter((p) => p.label.toLowerCase() === m.label.toLowerCase()).map((p) => JSON.stringify(p.fixedValue)).join("/")}`);
-            else if (i >= 0) pool.splice(i, 1);
-          }
-        }
-      }
-    }
+    if (exp.traits) await checkTraits(s, "", page.traits, exp.traits, out);
 
     if (exp.options) {
       const want = exp.options.map((o) => o.id).sort((a, b) => a - b);
       const got = page.options.map((o) => o.id).sort((a, b) => a - b);
       if (JSON.stringify(want) !== JSON.stringify(got)) out.push(`options: asked ids [${want.join(", ")}], the species lists [${got.join(", ")}]`);
       for (const o of exp.options) {
-        for (const m of verifyEditForm(o.asked, parseForm(await getPage(s, o.editPath), /\/edit$/))) out.push(`option ${o.id} ("${o.option.name}") ${m}`);
+        const ohtml = await getPage(s, o.editPath);
+        for (const m of verifyEditForm(o.asked, parseForm(ohtml, /\/edit$/))) out.push(`option ${o.id} ("${o.option.name}") ${m}`);
+        // An option's own traits are listed on its edit page, in the same table shape as a species'.
+        await checkTraits(s, `option ${o.id} ("${o.option.name}") `, parseSpeciesPage(ohtml).traits, o.traits, out);
       }
     }
 
@@ -378,6 +505,11 @@ async function verifyOrThrow(s: SiteSession, id: number, editPath: string, exp: 
     return { value: { page, race }, mismatches: out };
   }, settleDelays);
   if (mismatches.length) throw new DdbWriteError(`ddb-homebrew: species ${id} was written but the read-back differs — ${mismatches.join("; ")}`, 200, mismatches);
+  // Actions and spell grants verify their own forms (each settle-retried inside the entity module).
+  for (const t of allTraits(exp)) {
+    for (const a of t.actions) await verifyLimitedUse(s, a);
+    for (const sp of t.spells) await verifyEntitySpell(s, sp);
+  }
   return value;
 }
 
@@ -415,6 +547,7 @@ function requireOptionsSupport(f: HomebrewSpeciesFields, current: boolean | unde
 
 export async function createHomebrewSpecies(f: HomebrewSpeciesFields): Promise<HomebrewSpeciesResult> {
   (f.traits ?? []).forEach((t, i) => validateTrait(t, i));
+  (f.options ?? []).forEach((o, i) => validateOption(o, i));
   requireOptionsSupport(f, false);
   const s = rtSiteSession();
   const form = await loadForm(s, "/homebrew/creations/create-species/create", /\/create-species\/create$/);
@@ -428,7 +561,7 @@ export async function createHomebrewSpecies(f: HomebrewSpeciesFields): Promise<H
   // The species exists from here on; a later failure must name it so the caller can fix or delete it.
   try {
     const createdTraits: CreatedTrait[] = [];
-    for (const t of traits ?? []) createdTraits.push(await addTrait(s, id, t));
+    for (const t of traits ?? []) createdTraits.push(await addTrait(s, id, SPECIES_ENTITY_TYPE_ID, t));
     const createdOptions: CreatedOption[] = [];
     for (const o of options ?? []) createdOptions.push(await addOption(s, editPath, o));
     const read = await verifyOrThrow(s, id, editPath, {
@@ -441,6 +574,7 @@ export async function createHomebrewSpecies(f: HomebrewSpeciesFields): Promise<H
 
 export async function updateHomebrewSpecies(id: number, f: HomebrewSpeciesFields): Promise<HomebrewSpeciesResult> {
   (f.traits ?? []).forEach((t, i) => validateTrait(t, i));
+  (f.options ?? []).forEach((o, i) => validateOption(o, i));
   const s = rtSiteSession();
   let editPath = await resolveEditPath(s, SPECIES_ENTITY_TYPE_ID, id);
   const { traits, options, ...base } = f;
@@ -462,7 +596,7 @@ export async function updateHomebrewSpecies(id: number, f: HomebrewSpeciesFields
     let createdTraits: CreatedTrait[] | undefined;
     if (traits !== undefined) {
       createdTraits = [];
-      for (const t of traits) createdTraits.push(await addTrait(s, id, t));
+      for (const t of traits) createdTraits.push(await addTrait(s, id, SPECIES_ENTITY_TYPE_ID, t));
       for (const old of before.traits) await ajaxPost(s, `/entity/species-trait/${old.id}/delete`, `remove trait ${old.id} ("${old.name}") from species ${id}`);
     }
     let createdOptions: CreatedOption[] | undefined;

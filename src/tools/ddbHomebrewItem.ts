@@ -54,7 +54,7 @@ const fields = {
   dexterityModifier: z.string().optional().describe("Armor only: \"Full Modifier\", \"Max 2\", or \"None\"."),
   strengthRequirement: z.number().int().min(0).optional().describe("Armor only."),
   stealthCheck: z.string().optional().describe("Armor only: \"None\" or \"Disadvantage\"."),
-  baseWeapon: optionRef.optional().describe("Weapon only: base weapon label, e.g. \"Longsword\". The list holds duplicate labels; an ambiguous label errors with the option ids — pass { value }."),
+  baseWeapon: optionRef.optional().describe("Weapon only, REQUIRED for baseType Weapon (DDB rejects a weapon without one; for a weapon DDB lacks, pick a stand-in and keep the real stats in the description): base weapon label, e.g. \"Longsword\". The list holds duplicate labels; an ambiguous label errors with the option ids — pass { value }."),
   requiresAttunement: z.boolean().optional(),
   attunementDescription: z.string().optional().describe("Who can attune, e.g. \"by a spellcaster\" (requires requiresAttunement: true)."),
   description: html("The item description"),

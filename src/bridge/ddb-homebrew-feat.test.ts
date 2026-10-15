@@ -29,7 +29,7 @@ vi.mock("./ddb-rt.js", () => ({
 
 import { parseForm, controlById } from "./html-form.js";
 import {
-  fillFeatForm, validateFeatFields, deleteLinks, featMismatches,
+  fillFeatForm, validateFeatFields, deleteLinks, featMismatches, optionLinks,
   createHomebrewFeat, updateHomebrewFeat, deleteHomebrewFeat, setSettleDelaysForTests,
 } from "./ddb-homebrew-feat.js";
 import { DdbWriteError } from "./ddb-write.js";
@@ -45,6 +45,7 @@ interface FeatState {
   name: string; version: string; snippet: string; description: string; tags: string[];
   prereqs: Array<{ pid: number; description: string; mappings: Array<{ typeLabel: string; subName: string; value: number | null; exclude: boolean }> }>;
   mods: Array<{ mid: number; label: string }>;
+  options: Array<{ oid: number; name: string; description: string; snippet: string }>;
 }
 
 const TAGS: Array<[string, string]> = [["1", "General"], ["2", "genral"], ["3", "Utility"]];
@@ -69,7 +70,7 @@ const listings = (s: FeatState) => `
   `<tr><td><div>${p.description}</div></td><td>${p.mappings.map((m) => `${m.typeLabel} - ${m.subName} : ${m.value}`).join(", ")}</td><td><a href="/entity/prerequisite/${p.pid}/edit">Edit</a> | <a href="/entity/prerequisite/${p.pid}/delete" class="modal-link">Delete</a></td></tr>`).join("")}</tbody></table>
 <table class="listing listing-rpgentity-modifier"><tbody>${s.mods.map((m) =>
   `<tr><td>${m.label}</td><td></td><td><a href="/modifier/${m.mid}/0/edit">Edit</a> | <a href="/modifier/${m.mid}/delete" class="modal-link">Delete</a></td></tr>`).join("")}</tbody></table>
-<a href="/feats/${ID}-axe/feat-option/9/delete">option</a>`;
+${s.options.map((o) => `<a href="/feats/${ID}-axe/feat-option/${o.oid}/delete">option</a>`).join("")}`;
 
 const modifierForm = `<form method="post" action="/modifier/create/${ID}-${T}/0">
 <select id="field-spell-modifier-type" name="type"><option value="">-</option><option value="9">Bonus</option><option value="20">Sense</option></select>
@@ -88,7 +89,7 @@ const prereqForm = (pid: number) => `<form method="post" action="/entity/prerequ
 
 /** Stateful fake of the feat builder routes, edit page, and game-data/feats. */
 function fakeDdb(opts: { staleJsonReads?: number; corruptJson?: (f: any) => void } = {}) {
-  const st: FeatState = { name: "", version: "", snippet: "", description: "", tags: [], prereqs: [], mods: [] };
+  const st: FeatState = { name: "", version: "", snippet: "", description: "", tags: [], prereqs: [], mods: [], options: [] };
   let created = false, nextId = 100, staleLeft = opts.staleJsonReads ?? 0;
   const old = { name: "old name" };
   const save = (body: unknown) => {
@@ -121,6 +122,23 @@ function fakeDdb(opts: { staleJsonReads?: number; corruptJson?: (f: any) => void
     });
     site.routes.set(`POST /entity/prerequisite/${pid}/delete`, () => { st.prereqs = st.prereqs.filter((p) => p.pid !== pid); return { status: 200, body: `{"RedirectUrl":"${EDIT}"}` }; });
     return { status: 303, location: `/entity/prerequisite/${pid}/edit` };
+  });
+  const optForm = (action: string, o?: FeatState["options"][number]) => `<form method="post" action="${action}">
+<input id="field-name" name="name" type="text" value="${o?.name ?? ""}" />
+<input id="field-description-type" name="description-type" type="hidden" value="1" />
+<textarea id="field-description-wysiwyg" name="description-wysiwyg">${o?.description ?? ""}</textarea>
+<textarea id="field-description" name="description">${o?.description ?? ""}</textarea>
+<textarea id="field-snippet" name="snippet">${o?.snippet ?? ""}</textarea></form>`;
+  site.routes.set(`GET /feats/${ID}-axe/feat-option/create`, { status: 200, body: optForm(`/feats/${ID}-axe/feat-option/create`) });
+  site.routes.set(`POST /feats/${ID}-axe/feat-option/create`, (b) => {
+    const m = b as URLSearchParams;
+    const oid = nextId++;
+    const o = { oid, name: m.get("name") ?? "", description: m.get("description-wysiwyg") ?? "", snippet: m.get("snippet") ?? "" };
+    st.options.push(o);
+    const edit = `/feats/${ID}-axe/feat-option/${oid}/edit`;
+    site.routes.set(`GET ${edit}`, () => ({ status: 200, body: optForm(edit, o) }));
+    site.routes.set(`POST /feats/${ID}-axe/feat-option/${oid}/delete`, () => { st.options = st.options.filter((x) => x.oid !== oid); return { status: 200, body: `{"RedirectUrl":"${EDIT}"}` }; });
+    return { status: 302, location: edit };
   });
   site.routes.set(`GET /modifier/create/${ID}-${T}/0`, { status: 200, body: modifierForm });
   site.routes.set(`POST /modifier/create/${ID}-${T}/0`, (b) => {
@@ -316,6 +334,60 @@ describe("updateHomebrewFeat", () => {
     await seed();
     site.routes.set("POST /entity/prerequisite/100/delete", { status: 500 });
     await expect(updateHomebrewFeat(ID, { prerequisites: [] })).rejects.toThrow(new RegExp(`update of feat ${ID} failed part-way`));
+  });
+});
+
+describe("feat options", () => {
+  const OPTS = [
+    { name: "Steady Aim", description: "<p>Light.</p>", snippet: "Light" },
+    { name: "Critical Damage", description: "<p>Crit.</p>", snippet: "Crit" },
+  ];
+
+  it("creates options with name, description and snippet and counts them on the edit page", async () => {
+    const st = fakeDdb();
+    await createHomebrewFeat({ ...BASE, options: OPTS });
+    expect(st.options.map((o) => [o.name, o.description, o.snippet])).toEqual(OPTS.map((o) => [o.name, o.description, o.snippet]));
+    const post = String(site.calls.find((c) => c.method === "POST" && c.path.endsWith("/feat-option/create"))!.body);
+    expect(post).toContain("description-type=1");
+  });
+
+  it("names the feat and option when DDB mangles an option on read-back", async () => {
+    const st = fakeDdb();
+    site.routes.set(`POST /feats/${ID}-axe/feat-option/create`, () => {
+      st.options.push({ oid: 77, name: "Wrong", description: "", snippet: "" });
+      site.routes.set(`GET /feats/${ID}-axe/feat-option/77/edit`, { status: 200, body: `<form method="post" action="/feats/${ID}-axe/feat-option/77/edit"><input id="field-name" name="name" value="Wrong" /><textarea id="field-description-wysiwyg" name="description-wysiwyg"></textarea><textarea id="field-snippet" name="snippet"></textarea></form>` });
+      return { status: 302, location: `/feats/${ID}-axe/feat-option/77/edit` };
+    });
+    await expect(createHomebrewFeat({ ...BASE, options: [OPTS[0]] })).rejects.toThrow(/option "Steady Aim" \(77\) of feat 55 was created, then: .*read-back differs/);
+  });
+
+  it("REPLACES options on update through the page's own delete hrefs; omitted leaves them", async () => {
+    const st = fakeDdb();
+    await createHomebrewFeat({ ...BASE, options: OPTS });
+    site.calls.length = 0;
+    await updateHomebrewFeat(ID, { snippet: "only snippet" });
+    expect(st.options).toHaveLength(2);
+    await updateHomebrewFeat(ID, { options: [OPTS[1]] });
+    expect(st.options.map((o) => o.name)).toEqual(["Critical Damage"]);
+    expect(site.calls.filter((c) => /feat-option\/\d+\/delete$/.test(c.path))).toHaveLength(2);
+    await updateHomebrewFeat(ID, { options: [] });
+    expect(st.options).toEqual([]);
+  });
+
+  it("validates an option without a name and an option action without a reset for its uses before creating", () => {
+    expect(() => validateFeatFields({ options: [{ name: " " }] })).toThrow(/options\[0\] needs a name/);
+    expect(() => validateFeatFields({ options: [{ name: "X", actions: [{ name: "a", actionType: "General", uses: { count: 1 } }] }] })).toThrow(/reset/i);
+  });
+
+  it("optionLinks lists each option once with its verbatim delete href", () => {
+    expect(optionLinks('<a href="/feats/55-axe/feat-option/3/delete">o</a><a href="/feats/55-axe/feat-option/3/delete">o</a><a href="/feats/55-axe/feat-option/4/delete">o</a>'))
+      .toEqual([{ id: 3, deleteHref: "/feats/55-axe/feat-option/3/delete" }, { id: 4, deleteHref: "/feats/55-axe/feat-option/4/delete" }]);
+  });
+
+  it("featMismatches flags a wrong option / action / spell count", () => {
+    const form = parseForm(mainForm(EDIT), /edit$/);
+    const out = featMismatches({ asked: new Map(), json: {}, counts: { options: 2, actions: 1, spells: 1 } }, form, '<a href="/feats/55-axe/feat-option/3/delete">o</a>', { name: "A" });
+    expect(out.join("|")).toMatch(/options: asked 2, page lists 1.*actions: asked 1, page lists 0.*spells: asked 1, page lists 0/);
   });
 });
 

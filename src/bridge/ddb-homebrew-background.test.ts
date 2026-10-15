@@ -5,7 +5,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 const { site } = vi.hoisted(() => {
   const fresh = () => ({
     id: 77, name: "", version: "", tags: [] as string[], descs: {} as Record<string, string>, titled: {} as Record<string, string>,
-    pools: {} as Record<string, { mid: number; values: string[] } | undefined>,
+    pools: {} as Record<string, Array<{ mid: number; values: string[] }>>,
     feats: [] as Array<{ sid: number; name: string; feats: string[] }>,
     equipment: [] as Array<{ sid: number; name: string }>,
     chars: [] as Array<{ sid: number; type: string; name: string }>,
@@ -71,9 +71,8 @@ function sections(s: typeof site.st): string {
   const sec = (cls: string, head: string, rows: string[]) => `<div class="ddb-homebrew-create-special ddb-homebrew-create-special-${cls}"><div class="ddb-homebrew-create-header"><div class="ddb-homebrew-create-header-primary"><div class="ddb-homebrew-create-header-primary-text">${head}</div></div></div><table><tbody>${rows.join("")}</tbody></table></div>`;
   const row = (cells: string[], edit: string, del: string) => `<tr>${cells.map((c) => `<td>${c}</td>`).join("")}<td><a href="${edit}">Edit</a> | <a href="${del}" class="modal-link">Delete</a></td></tr>`;
   const pool = (n: string, head: string) => {
-    const p = s.pools[POOL_KEY[n]];
-    const labels = p ? p.values.map((v) => POOL_OPTS[n].find(([id]) => id === v)![1]).join(", ") : "";
-    return sec(POOL_KEY[n], `${head} (${p ? 1 : 0})`, p ? [row([`Proficiency - Choose a ${POOL_WORD[n]} - ${labels}`], `/modifier/${p.mid}/${n}/edit`, `/modifier/${p.mid}/delete`)] : []);
+    const ps = s.pools[POOL_KEY[n]] ?? [];
+    return sec(POOL_KEY[n], `${head} (${ps.length})`, ps.map((p) => row([`Proficiency - Choose a ${POOL_WORD[n]} - ${p.values.map((v) => POOL_OPTS[n].find(([id]) => id === v)![1]).join(", ")}`], `/modifier/${p.mid}/${n}/edit`, `/modifier/${p.mid}/delete`)));
   };
   return pool("1", "Skill Proficiencies") + pool("2", "Tool Proficiencies") + pool("3", "Languages")
     + sec("equipment", `Equipment (${s.equipment.length})`, s.equipment.map((e) => row([e.name], `/entity/starting-equipment-slot/${e.sid}/edit`, `/entity/starting-equipment-slot/${e.sid}/delete`)))
@@ -115,15 +114,15 @@ function route(method: string, path: string, body?: FormData | URLSearchParams):
   let m: RegExpMatchArray | null;
   if ((m = path.match(/^\/modifier\/create\/77-1669830167\/([123])$/))) {
     if (method === "GET") return page(simpleForm(path, selHtml("field-spell-modifier-default-sub-types", "spell-modifier-default-sub-types", POOL_OPTS[m[1]], [])));
-    snap(); s.pools[POOL_KEY[m[1]]] = { mid: s.next++, values: (body as URLSearchParams).getAll("spell-modifier-default-sub-types") };
+    snap(); (s.pools[POOL_KEY[m[1]]] ??= []).push({ mid: s.next++, values: (body as URLSearchParams).getAll("spell-modifier-default-sub-types") });
     return redirect(`${editPath()}#x`);
   }
   if ((m = path.match(/^\/modifier\/(\d+)\/([123])\/edit$/))) {
-    const p = s.pools[POOL_KEY[m[2]]];
-    return p && p.mid === Number(m[1]) ? page(simpleForm(path, selHtml("field-spell-modifier-default-sub-types", "spell-modifier-default-sub-types", POOL_OPTS[m[2]], p.values))) : new Response("", { status: 404 });
+    const p = (s.pools[POOL_KEY[m[2]]] ?? []).find((x) => x.mid === Number(m![1]));
+    return p ? page(simpleForm(path, selHtml("field-spell-modifier-default-sub-types", "spell-modifier-default-sub-types", POOL_OPTS[m[2]], p.values))) : new Response("", { status: 404 });
   }
   if ((m = path.match(/^\/modifier\/(\d+)\/delete$/)) && method === "POST") {
-    for (const k of Object.keys(s.pools)) if (s.pools[k]?.mid === Number(m[1])) s.pools[k] = undefined;
+    for (const k of Object.keys(s.pools)) s.pools[k] = s.pools[k].filter((x) => x.mid !== Number(m![1]));
     return new Response(JSON.stringify({ RedirectUrl: "/x" }), { status: 200 });
   }
   if (path === `${bgSlug()}/granted-feat/create`) {
@@ -173,7 +172,7 @@ describe("label resolution", () => {
   it("resolves skill labels to option ids and posts one pool", async () => {
     const r = await createHomebrewBackground({ ...BASE, skills: ["Athletics", "stealth"] });
     expect(r.id).toBe(77);
-    expect(site.st.pools.skills?.values).toEqual(["3783", "3786"]);
+    expect(site.st.pools.skills[0].values).toEqual(["3783", "3786"]);
     expect(posts(/modifier\/create/)).toHaveLength(1);
     expect(r.readBack.pools.skills).toEqual(["Athletics", "Stealth"]);
   });
@@ -186,7 +185,7 @@ describe("label resolution", () => {
     await expect(createHomebrewBackground({ ...BASE, tools: ["Thieves' Tools"] })).rejects.toThrow(/ambiguous.*71.*72/s);
     site.reset();
     const r = await createHomebrewBackground({ ...BASE, tools: [{ value: "72" }, "Disguise Kit"] });
-    expect(site.st.pools.tools?.values).toEqual(["72", "73"]);
+    expect(site.st.pools.tools[0].values).toEqual(["72", "73"]);
     expect(r.readBack.counts.tools).toBe(1);
   });
 
@@ -221,6 +220,43 @@ describe("create", () => {
   });
 });
 
+describe("fixed grants", () => {
+  it("posts one single-option row per grant, beside the pool, and verifies each row's option ids", async () => {
+    const r = await createHomebrewBackground({ ...BASE, skillGrants: ["Athletics", "Stealth"], tools: [{ value: "71" }, "Disguise Kit"], toolGrants: [{ value: "72" }] });
+    expect(site.st.pools.skills.map((x) => x.values)).toEqual([["3783"], ["3786"]]);
+    expect(site.st.pools.tools.map((x) => x.values)).toEqual([["71", "73"], ["72"]]);
+    expect(posts(/modifier\/create/)).toHaveLength(4);
+    expect(r.readBack.counts).toMatchObject({ skills: 2, tools: 2 });
+    expect(r.readBack.pools.skills).toEqual(["Athletics", "Stealth"]);
+  });
+
+  it("an ambiguous grant label throws with the ids", async () => {
+    await expect(createHomebrewBackground({ ...BASE, toolGrants: ["Thieves' Tools"] })).rejects.toThrow(/ambiguous.*71.*72/s);
+  });
+
+  it("rejects the same option as pool member and grant", async () => {
+    await expect(createHomebrewBackground({ ...BASE, skills: ["Athletics", "Arcana"], skillGrants: ["Athletics"] })).rejects.toThrow(/same option twice/);
+  });
+
+  it("update replaces the whole kind (pool and grants together) and null clears the grants", async () => {
+    await createHomebrewBackground({ ...BASE, skills: ["Athletics", "Stealth"], skillGrants: ["Arcana"] });
+    await updateHomebrewBackground(77, { skillGrants: ["Stealth", "Athletics"] });
+    expect(site.st.pools.skills.map((x) => x.values)).toEqual([["3786"], ["3783"]]);   // the pool went with the replace
+    const r = await updateHomebrewBackground(77, { skillGrants: null });
+    expect(r.readBack.counts.skills).toBe(0);
+  });
+
+  it("a verification mismatch on a grant row's option is reported", async () => {
+    await createHomebrewBackground(BASE);
+    const orig = site.st;
+    // the fake stores a different option than asked for the grant
+    Object.defineProperty(orig.pools, "skills", { configurable: true, get: () => [{ mid: 5, values: ["3790"] }], set: () => {} });
+    const err = await updateHomebrewBackground(77, { skillGrants: ["Athletics"] }).catch((e) => e);
+    expect(err).toBeInstanceOf(DdbWriteError);
+    expect(err.message).toMatch(/skills: asked option ids \[\["3783"\]\]/);
+  });
+});
+
 describe("update", () => {
   it("renames, changes only the given fields, and replaces a pool and the equipment wholesale", async () => {
     await createHomebrewBackground({ ...BASE, version: "1.0", skills: ["Athletics", "Stealth"], equipment: ["a dagger"], characteristics: [{ type: "Bond", text: "my crew" }] });
@@ -228,7 +264,7 @@ describe("update", () => {
     expect(site.st.name).toBe("Zz Renamed");
     expect(site.st.version).toBe("1.0");                                 // untouched
     expect(sameHtml(site.st.descs["short-description"], "<p>A traveller.</p>")).toBe(true); // the form re-posts it without its <p>, as the live page shows it
-    expect(site.st.pools.skills?.values).toEqual(["3790"]);
+    expect(site.st.pools.skills[0].values).toEqual(["3790"]);
     expect(site.st.equipment.map((e) => e.name)).toEqual(["rope", "lantern"]);
     expect(site.st.chars).toHaveLength(1);                                // not provided → kept
     expect(r.editUrl).toMatch(/77-zz-renamed\/edit$/);
@@ -246,7 +282,7 @@ describe("update", () => {
   it("resolves labels before deleting anything", async () => {
     await createHomebrewBackground({ ...BASE, tools: ["Disguise Kit"] });
     await expect(updateHomebrewBackground(77, { tools: ["Thieves' Tools"] })).rejects.toThrow(/ambiguous/);
-    expect(site.st.pools.tools?.values).toEqual(["73"]);
+    expect(site.st.pools.tools[0].values).toEqual(["73"]);
     expect(posts(/delete/)).toHaveLength(0);
   });
 });
@@ -282,7 +318,10 @@ describe("verification", () => {
 
   it("tolerates the stripped <p> wrapper on single-line descriptions", () => {
     expect(sameHtml("<p>Alert</p>", "Alert")).toBe(true);
-    expect(sameHtml("<p>a</p><p>b</p>", "a</p><p>b")).toBe(false);
+    // live: a multi-block value loses only its leading <p> / trailing </p>
+    expect(sameHtml("<p>a</p><p>b</p><ul><li>c</li></ul>", "a</p><p>b</p><ul><li>c</li></ul>")).toBe(true);
+    expect(sameHtml("<p>a</p><p>b</p>", "a</p><p>x")).toBe(false);
+    expect(sameHtml("<p>a</p><p>b</p>", "a b")).toBe(false);
   });
 });
 

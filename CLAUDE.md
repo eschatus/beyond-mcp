@@ -82,6 +82,8 @@ src/tools/ddbHomebrew*.ts ─▶ src/bridge/ddb-homebrew-{type}.ts   one module 
                                  ▼
                      src/bridge/ddb-homebrew-core.ts  submit/ajaxPost/settle/deleteCreation/
                                  │                     resolveEditPath/modifier subtypes
+                     src/bridge/ddb-homebrew-entity.ts limited-use actions + entity spells on any owner
+                                 │                     (feat, feat option, trait, class feature, feature option)
                                  ▼
                      html-form.ts + rtSiteSession (www cookie jar)
 ```

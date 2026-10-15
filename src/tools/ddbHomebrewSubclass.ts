@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import * as hb from "../bridge/ddb-homebrew-subclass.js";
 import { text, optionChoice } from "./helpers.js";
+import { limitedUseSchema, entitySpellSchema } from "./homebrewEntitySchemas.js";
 
 // D&D Beyond homebrew SUBCLASS tools — create / update / delete without the site's builder UX.
 // Registered only when DDB_WRITES=enabled (alongside the monster tools). Primitives: they do exactly
@@ -28,6 +29,20 @@ const modifier = z.object({
   availableToMulticlass: z.boolean().optional().describe("Defaults to false (the builder pre-checks it; this tool sets it explicitly)."),
 });
 
+const featureOption = z.object({
+  name: z.string().min(1).max(1024),
+  snippet: z.string().max(2048).optional(),
+  description: html("Option description (at least ~4 characters of text)"),
+  multiclassDescription: html("Description shown when taken through multiclassing").optional(),
+  isGranted: z.boolean().optional().describe("\"Is Granted\": always given instead of chosen."),
+  requiredLevel: z.number().int().min(1).max(20).optional().describe("Character level at which the option unlocks (e.g. 3, 6, 14 for tiered options)."),
+  dependsOn: z.string().optional().describe("Only offered when another option is chosen, as the builder labels it: \"Feature name - Option name\" (e.g. \"Lineage - First House\"). The target must belong to a feature EARLIER in the features list."),
+  prerequisiteText: z.string().optional(),
+  modifiers: z.array(modifier).optional().describe("Mechanical effects of the option (same editor as a feature's)."),
+  limitedUses: z.array(limitedUseSchema).optional(),
+  spells: z.array(entitySpellSchema).optional(),
+});
+
 const feature = z.object({
   name: z.string().min(1).max(1024),
   snippet: z.string().max(2048).optional().describe("Short summary shown in the character builder."),
@@ -41,6 +56,9 @@ const feature = z.object({
   hideInBuilder: z.boolean().optional(),
   hideInSheet: z.boolean().optional(),
   modifiers: z.array(modifier).optional().describe("Mechanical effects of the feature (the shared modifier editor)."),
+  options: z.array(featureOption).optional().describe("Choosable options of the feature (\"has options\" is switched on automatically). On update they are recreated with the feature."),
+  limitedUses: z.array(limitedUseSchema).optional().describe("Limited-use actions of the feature (uses, reset, activation): the builder's Add Action."),
+  spells: z.array(entitySpellSchema).optional().describe("Spell grants of the feature: always prepared, available from a level, free casts per rest, cantrips. One entry is one DDB row."),
   levelScales: z.array(z.object({
     level: z.number().int().min(1).max(20),
     dice: z.object({ count: z.number().int().min(1), die: z.union([z.literal(4), z.literal(6), z.literal(8), z.literal(10), z.literal(12), z.literal(20)]) }).optional(),
@@ -86,7 +104,7 @@ function summary(r: hb.HomebrewSubclassResult) {
 export function registerDdbHomebrewSubclassTools(server: McpServer): void {
   server.tool(
     "ddb_create_homebrew_subclass",
-    "Create a private homebrew subclass on the D&D Beyond account (no builder UI). className is the parent class's builder label (\"Wizard\"; pass the numeric option id where a label repeats, e.g. Legacy classes). Descriptions are HTML. Features are added after the base subclass, each with optional modifiers and level scales; a feature's type is create-only. The subclass is created ONCE and never retried (a retry made a live duplicate): if DDB's answer carries no id the error says a subclass MAY exist, check My Creations. There is no JSON read-back for subclasses; the result is verified against the builder's edit pages and feature table, and on any failure after the base create the error names the new subclass id so it can be fixed (ddb_update_homebrew_subclass) or removed (ddb_delete_homebrew_subclass). Not covered: feature options, feature spells, \"features to replace\" targets, avatars, copying an existing subclass.",
+    "Create a private homebrew subclass on the D&D Beyond account (no builder UI). className is the parent class's builder label (\"Wizard\"; pass the numeric option id where a label repeats, e.g. Legacy classes). Descriptions are HTML. Features are added after the base subclass, each with optional modifiers and level scales; a feature's type is create-only. The subclass is created ONCE and never retried (a retry made a live duplicate): if DDB's answer carries no id the error says a subclass MAY exist, check My Creations. There is no JSON read-back for subclasses; the result is verified against the builder's edit pages and feature table, and on any failure after the base create the error names the new subclass id so it can be fixed (ddb_update_homebrew_subclass) or removed (ddb_delete_homebrew_subclass). Features may carry options (per-option required level, dependent-option chains, modifiers, actions, spells), limited-use actions and spell grants. Not covered: \"features to replace\" targets, spell slot tables/cantrips-known counts (the builder has no field), avatars, copying an existing subclass.",
     { className: optionRef.describe("Parent class builder label, e.g. \"Wizard\", \"Cleric\"."), ...fields },
     async (f) => text(JSON.stringify(summary(await hb.createHomebrewSubclass(f)))),
   );
