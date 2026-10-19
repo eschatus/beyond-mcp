@@ -2,8 +2,9 @@
 //
 // This server NEVER opens a browser. The long-lived `CobaltSession` cookie is supplied
 // from outside: the DDB_COBALT env var, or a data file written by whatever harvested it
-// (the dm-whisper gem owns the interactive harvest UX). When the cookie is absent or
-// rejected, every read fails loud with instructions — there is no silent fallback.
+// (copied by hand from DevTools, or by a harvester such as the dm-whisper gem). When the
+// cookie is absent, malformed or rejected, every read fails loud with instructions — there
+// is no silent fallback.
 //
 // Auth chain (validated live, see docs/ddb-browserless-protocol.md):
 //   CobaltSession cookie ──POST auth-service/v1/cobalt-token──▶ short-lived JWT (ttl 300s)
@@ -42,21 +43,43 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 interface CobaltCache { cookie: string; harvestedAt: number }
 let _cobaltMem: string | null = null;
 
-function readCobaltFile(): string | null {
-  try { return existsSync(cobaltFile()) ? (JSON.parse(readFileSync(cobaltFile(), "utf-8")) as CobaltCache).cookie : null; }
-  catch { return null; }
-}
-
 export class CobaltUnavailableError extends Error {}
+
+// How to supply a cookie, for every auth failure. Harvester-neutral: copying it out of
+// DevTools by hand is as valid a source as the gem (README "Getting the cookie").
+const supplyHint = () =>
+  `This server never opens a browser — copy the CobaltSession cookie value from a logged-in ` +
+  `www.dndbeyond.com session (DevTools → Application/Storage → Cookies) and either set DDB_COBALT ` +
+  `or write {"cookie":"<value>"} to ${cobaltFile()}, then retry. See README "Getting the cookie".`;
 
 function noCobaltError(reason: "absent" | "rejected"): CobaltUnavailableError {
   const what = reason === "absent"
     ? "no D&D Beyond session cookie is available"
     : "the D&D Beyond session cookie was rejected (expired or revoked), and no fresher one is available";
-  return new CobaltUnavailableError(
-    `beyond-mcp: ${what}. This server never opens a browser — re-harvest CobaltSession in the gem ` +
-    `(writes ${cobaltFile()}) or set DDB_COBALT in the env, then retry.`,
-  );
+  return new CobaltUnavailableError(`beyond-mcp: ${what}. ${supplyHint()}`);
+}
+
+/**
+ * Missing file → null (fall through to "absent"). A file that exists but can't yield a
+ * cookie is a broken harvest, not an absent cookie — fail loud naming the file and why.
+ * A leading UTF-8 BOM is stripped: Windows tools (PowerShell 5.1's Out-File/Set-Content
+ * -Encoding utf8) write one, and the JSON under it is fine.
+ */
+function readCobaltFile(): string | null {
+  const file = cobaltFile();
+  if (!existsSync(file)) return null;
+  let parsed: unknown;
+  try { parsed = JSON.parse(readFileSync(file, "utf-8").replace(/^\uFEFF/, "")); }
+  catch (e) { throw malformedCobaltError(file, `not valid JSON (${(e as Error).message})`); }
+  const cookie = (parsed as Partial<CobaltCache> | null)?.cookie;
+  if (typeof cookie !== "string" || cookie.trim() === "") {
+    throw malformedCobaltError(file, `no non-empty string "cookie" field`);
+  }
+  return cookie.trim();
+}
+
+function malformedCobaltError(file: string, why: string): CobaltUnavailableError {
+  return new CobaltUnavailableError(`beyond-mcp: ${file} exists but is unusable: ${why}. ${supplyHint()}`);
 }
 
 /**
@@ -79,9 +102,11 @@ function getCobalt(afterRejection = false): string {
 }
 
 // Cobalt if it's already available (env/mem/disk). Used by the optional damageAdjustments
-// overlay, which must silently skip — never throw — when no cookie is around.
+// overlay, which must skip — never throw — when no usable cookie is around. A malformed
+// file is not hidden by this: every authed read goes through getCobalt, which surfaces it.
 function peekCobalt(): string | null {
-  return process.env.DDB_COBALT || _cobaltMem || readCobaltFile();
+  try { return process.env.DDB_COBALT || _cobaltMem || readCobaltFile(); }
+  catch (e) { if (e instanceof CobaltUnavailableError) return null; throw e; }
 }
 
 // --- cobalt → short-lived JWT (in-memory cache, re-read cobalt sources on 401) ---

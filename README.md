@@ -142,9 +142,45 @@ One credential: the long-lived D&D Beyond **`CobaltSession`** cookie, exchanged 
 no call races its expiry. The same JWT authenticates the game-log WebSocket (as `?stt=`).
 
 Resolution order is `DDB_COBALT`, then `<data dir>/ddb-cobalt.json`. When the cookie is
-absent or gets rejected, every read fails with a `CobaltUnavailableError` naming the file it
-looked in and how to refresh it. The server never retries a cookie that was just rejected,
-and never falls back to a browser.
+absent, malformed or rejected, every read fails with a `CobaltUnavailableError` naming the
+file it looked in and how to refresh it. The server never retries a cookie that was just
+rejected, and never falls back to a browser.
+
+### Getting the cookie
+
+There is no harvester in this repo. Any app with a user in front of it can write the file;
+otherwise copy the cookie by hand, which takes a minute:
+
+1. Log in at `www.dndbeyond.com` with **"remember me"** ticked — that is the long-lived
+   cookie.
+2. Open DevTools → **Application** (Chrome/Edge) or **Storage** (Firefox) → **Cookies** →
+   `https://www.dndbeyond.com`, and copy the **value** of `CobaltSession` (without the
+   `CobaltSession=` prefix). It is `HttpOnly`, so `document.cookie` will not show it.
+3. Close the tab rather than logging out; logging out is likely to revoke the session.
+
+Check it before wiring anything up — a working cookie exchanges for a JWT:
+
+```sh
+curl -s -X POST https://auth-service.dndbeyond.com/v1/cobalt-token \
+  -H "Cookie: CobaltSession=<value>" -H "Content-Type: application/json" -d '{}'
+# → {"token":"eyJ…","ttl":300}
+```
+
+Then supply it one of two ways:
+
+- **`DDB_COBALT`** in the MCP client's `env` block (see Quick start). Simplest; changing it
+  means restarting the server.
+- **`<DDB_DATA_DIR>/ddb-cobalt.json`** containing `{"cookie": "<value>"}` (a `harvestedAt`
+  epoch-ms field is conventional but unread). Better for rotation: when a cookie is
+  rejected the server re-reads the file and picks up a different value without a restart.
+  Set `DDB_DATA_DIR` to an **absolute** path — the default `./data` resolves against the
+  working directory, which MCP clients choose for you. The same goes for `.env`, which is
+  loaded from the working directory, not from beside the server, so prefer the client's
+  `env` block.
+
+When it eventually expires, reads start failing with `CobaltUnavailableError` (and
+`ddb_roll_pump_status` shows climbing failures) — copy a fresh value and overwrite the file.
+Call `ddb_list_campaigns` to confirm; `ddb_ping` does not exercise the cookie.
 
 Full protocol notes — the auth chain, every endpoint, the monster-service id→name mapping,
 the game-log message shape, and Beyond20's `__b20Override__` semantics — are in
@@ -156,7 +192,7 @@ the game-log message shape, and Beyond20's `__b20Override__` semantics — are i
 | Env | Meaning |
 |---|---|
 | `DDB_COBALT` | CobaltSession cookie value. Takes precedence over the data file. |
-| `DDB_DATA_DIR` | Directory holding `ddb-cobalt.json` and the monster-config cache. Point it at whatever directory your harvester writes to, so one credential is shared rather than two that expire independently. Default `./data`. |
+| `DDB_DATA_DIR` | Directory holding `ddb-cobalt.json` and the monster-config cache. Point it at whatever directory your harvester writes to, so one credential is shared rather than two that expire independently. Default `./data` (working-directory-relative — use an absolute path). |
 | `DDB_CAMPAIGN_ID` | Default campaign for `ddb_list_campaign_characters`, `ddb_get_party_snapshot` and `start_ddb_roll_pump`. |
 | `DDB_WRITES` | `enabled` registers the write tools. Anything else, or unset, means reads only. |
 | `DDB_HTTP_PORT` / `DDB_HTTP_HOST` | HTTP entry only. Default `39210` / `127.0.0.1`. |

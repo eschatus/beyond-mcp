@@ -6,8 +6,9 @@ Everything is plain Node `fetch`. Implemented in [`src/bridge/ddb-rt.ts`](../src
 
 Unlike its origin (roll20-dm-mcp, extracted per its issue #171), **this server never touches a
 browser at all**: the `CobaltSession` cookie arrives from the `DDB_COBALT` env var or from
-`<data dir>/ddb-cobalt.json`, written by whatever harvested it (the dm-whisper gem owns the
-interactive harvest UX). Absent/expired cookie ⇒ loud error, no fallback.
+`<data dir>/ddb-cobalt.json`, written by whatever harvested it (copied by hand from DevTools —
+README "Getting the cookie" — or by a harvester such as the dm-whisper gem). Absent, malformed or
+expired cookie ⇒ loud error, no fallback.
 
 ## Auth chain
 
